@@ -63,6 +63,9 @@ type Model struct {
 	// Multi-line accumulation
 	multilineParts []string // collected lines during multi-line input
 
+	// Mouse mode
+	mouseEnabled bool // true = scroll wheel captures; false = native selection/copy
+
 	// Styles
 	promptStyle lipgloss.Style
 	outputStyle lipgloss.Style
@@ -78,16 +81,17 @@ func NewModel(deps Dependencies) Model {
 	mlPrompt := cfg.UI.MultilinePrompt
 
 	m := Model{
-		deps:      deps,
-		ed:        editor.New(),
-		prompt:    prompt,
-		mlPrompt:  mlPrompt,
-		output:    []string{},
-		cursorOn:  true,
-		promptStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
-		outputStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
-		errorStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
-		compStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("246")),
+		deps:         deps,
+		ed:           editor.New(),
+		prompt:       prompt,
+		mlPrompt:     mlPrompt,
+		output:       []string{},
+		cursorOn:     true,
+		mouseEnabled: true,
+		promptStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
+		outputStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
+		errorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
+		compStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("246")),
 		compSelStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62")).Bold(true),
 	}
 	_ = cfg.Theme // theme is used via Highlighter
@@ -140,6 +144,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleMouse processes mouse events — scroll wheel controls output area scrolling.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if !m.mouseEnabled {
+		return m, nil
+	}
 	switch msg.Type {
 	case tea.MouseWheelUp:
 		if m.scrollOffset < len(m.output)-1 {
@@ -317,11 +324,62 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyRunes:
-		m.ed.Insert(msg.String())
+		// Use raw runes instead of msg.String() to avoid [ ] brackets
+		// that Bubble Tea adds around pasted content for shortcut safety.
+		// Also handle control characters that might leak through as runes.
+		if len(msg.Runes) == 1 && msg.Runes[0] < 32 {
+			return m.handleCtrlRune(msg.Runes[0])
+		}
+		m.ed.Insert(string(msg.Runes))
 		m.showComp = false
 		return m, nil
 	}
 
+	return m, nil
+}
+
+// handleCtrlRune handles control characters (0-31) that leak through as KeyRunes.
+func (m Model) handleCtrlRune(r rune) (tea.Model, tea.Cmd) {
+	switch r {
+	case 1: // Ctrl+A
+		m.ed.MoveHome()
+		m.showComp = false
+	case 5: // Ctrl+E
+		m.ed.MoveEnd()
+		m.showComp = false
+	case 3: // Ctrl+C — same as KeyCtrlC
+		return m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	case 4: // Ctrl+D — same as KeyCtrlD
+		return m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlD})
+	case 8: // Ctrl+H — backspace
+		m.ed.Backspace(1)
+		m.showComp = false
+	case 11: // Ctrl+K — kill to end of line
+		pos := m.ed.CursorPos()
+		text := []rune(m.ed.Text())
+		if pos < len(text) {
+			m.ed = editor.New()
+			m.ed.SetText(string(text[:pos]))
+			m.ed.MoveEnd()
+		}
+		m.showComp = false
+	case 21: // Ctrl+U — kill to beginning of line
+		pos := m.ed.CursorPos()
+		text := []rune(m.ed.Text())
+		if pos > 0 {
+			m.ed = editor.New()
+			m.ed.SetText(string(text[pos:]))
+		}
+		m.showComp = false
+	case 23: // Ctrl+W — delete word backward
+		word := m.ed.WordBeforeCursor()
+		if word != "" {
+			m.ed.Backspace(len([]rune(word)))
+		}
+		m.showComp = false
+	default:
+		// Ignore other control characters
+	}
 	return m, nil
 }
 
@@ -476,6 +534,15 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.addOutput("\\source is not yet supported in this version.")
 		}
 
+	case "\\mouse":
+		m.mouseEnabled = !m.mouseEnabled
+		if m.mouseEnabled {
+			m.addOutput("Mouse mode enabled (scroll wheel active)")
+			return m, func() tea.Msg { return tea.EnableMouseCellMotion() }
+		}
+		m.addOutput("Mouse mode disabled (text selection/copy active)")
+		return m, func() tea.Msg { return tea.DisableMouse() }
+
 	default:
 		m.addOutput(fmt.Sprintf("Unknown command: %s. Type \\help for available commands.", command))
 	}
@@ -518,7 +585,7 @@ func (m Model) executeInput(input string, useVertical bool) (tea.Model, tea.Cmd)
 	ctx := context.Background()
 	result, err := m.deps.Executor.Execute(ctx, execSQL)
 	if err != nil {
-		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		m.addOutput(fmt.Sprintf("%s", err))
 		m.executing = false
 		m.ed.Clear()
 		return m, nil
@@ -705,23 +772,50 @@ func (m Model) View() string {
 	input := m.ed.Text()
 	cursorPos := m.ed.CursorPos()
 
-	// Cursor character: visible when blinking on, empty when off
-	cursorChar := "█"
-	if !m.cursorOn {
-		cursorChar = " "
-	}
+	// Cursor: overlay on character at cursor position using reverse video
+	cursorStyle := lipgloss.NewStyle().Reverse(true)
 
 	if input == "" {
-		sb.WriteString(cursorChar)
+		if m.cursorOn {
+			sb.WriteString(cursorStyle.Render(" "))
+		} else {
+			sb.WriteString(" ")
+		}
 	} else {
-		// Split input at cursor position (rune-based index)
 		runes := []rune(input)
 		beforeText := string(runes[:cursorPos])
-		afterText := string(runes[cursorPos:])
-		if m.deps.Highlighter != nil {
-			sb.WriteString(m.deps.Highlighter.Highlight(beforeText) + cursorChar + m.deps.Highlighter.Highlight(afterText))
+
+		if m.cursorOn && cursorPos < len(runes) {
+			// Cursor overlays the character at cursorPos
+			cursorChar := string(runes[cursorPos])
+			afterText := string(runes[cursorPos+1:])
+			if m.deps.Highlighter != nil {
+				sb.WriteString(m.deps.Highlighter.Highlight(beforeText))
+				sb.WriteString(cursorStyle.Render(cursorChar))
+				sb.WriteString(m.deps.Highlighter.Highlight(afterText))
+			} else {
+				sb.WriteString(beforeText)
+				sb.WriteString(cursorStyle.Render(cursorChar))
+				sb.WriteString(afterText)
+			}
+		} else if m.cursorOn && cursorPos == len(runes) {
+			// Cursor at end of text — block cursor on empty space
+			if m.deps.Highlighter != nil {
+				sb.WriteString(m.deps.Highlighter.Highlight(beforeText))
+			} else {
+				sb.WriteString(beforeText)
+			}
+			sb.WriteString(cursorStyle.Render(" "))
 		} else {
-			sb.WriteString(beforeText + cursorChar + afterText)
+			// Cursor hidden (blink off)
+			afterText := string(runes[cursorPos:])
+			if m.deps.Highlighter != nil {
+				sb.WriteString(m.deps.Highlighter.Highlight(beforeText))
+				sb.WriteString(m.deps.Highlighter.Highlight(afterText))
+			} else {
+				sb.WriteString(beforeText)
+				sb.WriteString(afterText)
+			}
 		}
 	}
 
@@ -800,6 +894,7 @@ Backslash commands:
   \history [pat]    Search/show command history
   \connect <dsn>    Connect to a database
   \source <file>    Execute SQL from file
+  \mouse            Toggle mouse mode (scroll wheel vs text selection)
 
 Keyboard shortcuts:
   Tab               Auto-complete

@@ -71,7 +71,7 @@ func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, err
 		if err != nil {
 			result.Error = err
 			result.Duration = time.Since(start)
-			return result, fmt.Errorf("query error: %w", err)
+			return result, err
 		}
 		defer rows.Close()
 
@@ -80,7 +80,7 @@ func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, err
 		if err != nil {
 			result.Error = err
 			result.Duration = time.Since(start)
-			return result, fmt.Errorf("column error: %w", err)
+			return result, err
 		}
 		result.Columns = cols
 
@@ -94,7 +94,7 @@ func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, err
 			if err := rows.Scan(rowPtrs...); err != nil {
 				result.Error = err
 				result.Duration = time.Since(start)
-				return result, fmt.Errorf("scan error: %w", err)
+				return result, err
 			}
 			// Convert []byte to string for display
 			converted := make([]any, len(row))
@@ -110,7 +110,7 @@ func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, err
 		if err := rows.Err(); err != nil {
 			result.Error = err
 			result.Duration = time.Since(start)
-			return result, fmt.Errorf("rows error: %w", err)
+			return result, err
 		}
 		result.RowCount = int64(len(result.Rows))
 	} else {
@@ -119,7 +119,7 @@ func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, err
 		if err != nil {
 			result.Error = err
 			result.Duration = time.Since(start)
-			return result, fmt.Errorf("exec error: %w", err)
+			return result, err
 		}
 
 		affected, _ := res.RowsAffected()
