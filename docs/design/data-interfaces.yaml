@@ -1,0 +1,506 @@
+# mysh 接口契约定义
+# 版本: v1.0
+# 日期: 2026-05-04
+
+# ============================================================
+# 1. config — 配置管理
+# ============================================================
+config:
+  package: "mysh/config"
+  interfaces:
+    - name: "Config"
+      description: "全局配置结构体，从 ~/.mysh.yaml 加载"
+      fields:
+        - name: "Connection"
+          type: "ConnectionConfig"
+          description: "MySQL 连接配置"
+        - name: "UI"
+          type: "UIConfig"
+          description: "界面配置"
+        - name: "Theme"
+          type: "ThemeConfig"
+          description: "高亮主题配置"
+        - name: "History"
+          type: "HistoryConfig"
+          description: "历史记录配置"
+        - name: "Completion"
+          type: "CompletionConfig"
+          description: "补全配置"
+      methods:
+        - name: "Load"
+          signature: "Load(path string) (*Config, error)"
+          description: "从指定路径加载配置文件，path 为空则使用默认路径"
+        - name: "Save"
+          signature: "Save(path string) error"
+          description: "保存配置到文件"
+
+    - name: "ConnectionConfig"
+      fields:
+        - name: "Host"
+          type: "string"
+          default: "\"127.0.0.1\""
+        - name: "Port"
+          type: "int"
+          default: "3306"
+        - name: "User"
+          type: "string"
+          default: "\"root\""
+        - name: "Password"
+          type: "string"
+          default: "\"\""
+        - name: "Database"
+          type: "string"
+          default: "\"\""
+
+    - name: "UIConfig"
+      fields:
+        - name: "Prompt"
+          type: "string"
+          default: "\"mysh> \""
+        - name: "MultilinePrompt"
+          type: "string"
+          default: "\"    -> \""
+        - name: "PageSize"
+          type: "int"
+          default: "20"
+
+    - name: "ThemeConfig"
+      fields:
+        - name: "Keyword"
+          type: "string"
+          default: "\"bold magenta\""
+        - name: "String"
+          type: "string"
+          default: "\"yellow\""
+        - name: "Number"
+          type: "string"
+          default: "\"cyan\""
+        - name: "Comment"
+          type: "string"
+          default: "\"dim\""
+        - name: "Function"
+          type: "string"
+          default: "\"green\""
+        - name: "Operator"
+          type: "string"
+          default: "\"white\""
+
+    - name: "HistoryConfig"
+      fields:
+        - name: "File"
+          type: "string"
+          default: "\"~/.mysh_history\""
+        - name: "MaxEntries"
+          type: "int"
+          default: "10000"
+
+    - name: "CompletionConfig"
+      fields:
+        - name: "MinChars"
+          type: "int"
+          default: "2"
+          description: "触发补全的最少输入字符"
+        - name: "MaxSuggestions"
+          type: "int"
+          default: "15"
+
+# ============================================================
+# 2. connection — MySQL 连接管理
+# ============================================================
+connection:
+  package: "mysh/connection"
+  interfaces:
+    - name: "Pool"
+      description: "MySQL 连接池，封装 go-sql-driver/mysql"
+      methods:
+        - name: "Connect"
+          signature: "Connect(cfg *config.ConnectionConfig) error"
+          description: "建立连接，失败返回错误（含重试逻辑，最多3次，超时10s）"
+        - name: "Close"
+          signature: "Close() error"
+          description: "关闭连接池"
+        - name: "Query"
+          signature: "Query(ctx context.Context, sql string, args ...any) (*sql.Rows, error)"
+          description: "执行查询并返回行"
+        - name: "Exec"
+          signature: "Exec(ctx context.Context, sql string, args ...any) (sql.Result, error)"
+          description: "执行写操作（INSERT/UPDATE/DELETE）"
+        - name: "Ping"
+          signature: "Ping(ctx context.Context) error"
+          description: "检查连接是否存活"
+        - name: "IsConnected"
+          signature: "IsConnected() bool"
+          description: "当前是否已连接"
+        - name: "CurrentDB"
+          signature: "CurrentDB() string"
+          description: "当前使用的数据库名"
+        - name: "UseDB"
+          signature: "UseDB(ctx context.Context, db string) error"
+          description: "切换数据库"
+        - name: "Reset"
+          signature: "Reset(cfg *config.ConnectionConfig) error"
+          description: "断开并重新连接"
+
+# ============================================================
+# 3. metadata — Schema 元数据缓存
+# ============================================================
+metadata:
+  package: "mysh/metadata"
+  interfaces:
+    - name: "Cache"
+      description: "数据库 Schema 元数据缓存，惰性刷新"
+      methods:
+        - name: "Refresh"
+          signature: "Refresh(ctx context.Context) error"
+          description: "全量刷新当前数据库的表和列信息"
+        - name: "Databases"
+          signature: "Databases() []string"
+          description: "返回所有数据库名"
+        - name: "Tables"
+          signature: "Tables(db string) []string"
+          description: "返回指定数据库的所有表名，db 为空则使用当前库"
+        - name: "Columns"
+          signature: "Columns(db, table string) []ColumnInfo"
+          description: "返回指定表的列信息"
+        - name: "Functions"
+          signature: "Functions() []string"
+          description: "返回 MySQL 内置函数列表"
+        - name: "MarkDirty"
+          signature: "MarkDirty()"
+          description: "标记缓存为脏，下次访问时刷新"
+        - name: "IsDirty"
+          signature: "IsDirty() bool"
+          description: "缓存是否需要刷新"
+
+    - name: "ColumnInfo"
+      description: "列元数据"
+      fields:
+        - name: "Name"
+          type: "string"
+        - name: "Type"
+          type: "string"
+        - name: "Nullable"
+          type: "bool"
+        - name: "Key"
+          type: "string"
+          description: "PRI / UNI / MUL / 空"
+        - name: "Default"
+          type: "string"
+        - name: "Extra"
+          type: "string"
+
+# ============================================================
+# 4. highlight — 语法高亮
+# ============================================================
+highlight:
+  package: "mysh/highlight"
+  interfaces:
+    - name: "TokenType"
+      description: "Token 类型枚举"
+      values:
+        - "Keyword"
+        - "String"
+        - "Number"
+        - "Comment"
+        - "Identifier"
+        - "Operator"
+        - "Function"
+        - "Variable"
+        - "Punctuation"
+
+    - name: "Token"
+      description: "高亮 Token"
+      fields:
+        - name: "Type"
+          type: "TokenType"
+        - name: "Value"
+          type: "string"
+        - name: "Start"
+          type: "int"
+          description: "在输入中的起始位置"
+        - name: "End"
+          type: "int"
+          description: "在输入中的结束位置"
+
+    - name: "Tokenizer"
+      description: "SQL 分词器"
+      methods:
+        - name: "Tokenize"
+          signature: "Tokenize(input string) []Token"
+          description: "对输入 SQL 进行分词，返回 Token 列表。容错，不完整 SQL 也能返回部分 Token"
+
+    - name: "Highlighter"
+      description: "语法高亮渲染器"
+      methods:
+        - name: "Highlight"
+          signature: "Highlight(input string) string"
+          description: "对输入 SQL 进行高亮渲染，返回带 ANSI 转义码的字符串"
+        - name: "SetTheme"
+          signature: "SetTheme(theme *config.ThemeConfig)"
+          description: "设置高亮主题"
+
+# ============================================================
+# 5. completer — 自动补全
+# ============================================================
+completer:
+  package: "mysh/completer"
+  interfaces:
+    - name: "Suggestion"
+      description: "补全候选项"
+      fields:
+        - name: "Text"
+          type: "string"
+          description: "补全文本"
+        - name: "Type"
+          type: "SuggestionType"
+          description: "候选类型"
+        - name: "Detail"
+          type: "string"
+          description: "补充说明（如列类型）"
+
+    - name: "SuggestionType"
+      description: "补全候选类型枚举"
+      values:
+        - "Keyword"
+        - "Table"
+        - "Column"
+        - "Database"
+        - "Function"
+        - "Variable"
+        - "Alias"
+
+    - name: "ContextType"
+      description: "补全上下文类型"
+      values:
+        - "StatementStart"
+        - "AfterFrom"
+        - "AfterSelect"
+        - "AfterWhere"
+        - "AfterJoin"
+        - "AfterDot"
+        - "AfterSet"
+        - "AfterOrderBy"
+        - "AfterGroupBy"
+        - "Unknown"
+
+    - name: "Completer"
+      description: "自动补全引擎"
+      methods:
+        - name: "Complete"
+          signature: "Complete(ctx context.Context, input string, cursorPos int) ([]Suggestion, error)"
+          description: "根据当前输入和光标位置返回补全候选列表"
+        - name: "SetMetadata"
+          signature: "SetMetadata(cache metadata.Cache)"
+          description: "注入元数据缓存"
+
+    - name: "ContextAnalyzer"
+      description: "补全上下文推断器（内部接口）"
+      methods:
+        - name: "Analyze"
+          signature: "Analyze(input string, cursorPos int) ContextType"
+          description: "推断当前光标处的补全上下文类型"
+
+# ============================================================
+# 6. executor — SQL 执行器
+# ============================================================
+executor:
+  package: "mysh/executor"
+  interfaces:
+    - name: "QueryResult"
+      description: "查询结果"
+      fields:
+        - name: "Columns"
+          type: "[]string"
+        - name: "Rows"
+          type: "[][]any"
+        - name: "RowCount"
+          type: "int64"
+        - name: "AffectedRows"
+          type: "int64"
+        - name: "Duration"
+          type: "time.Duration"
+        - name: "IsQuery"
+          type: "bool"
+          description: "true=SELECT等查询，false=DDL/DML写操作"
+        - name: "Error"
+          type: "error"
+
+    - name: "Executor"
+      description: "SQL 执行器"
+      methods:
+        - name: "Execute"
+          signature: "Execute(ctx context.Context, sql string) (*QueryResult, error)"
+          description: "执行单条 SQL，返回结果。自动判断查询/写操作"
+        - name: "ExecuteMulti"
+          signature: "ExecuteMulti(ctx context.Context, sql string) ([]*QueryResult, error)"
+          description: "执行多条 SQL（分号分隔），返回每个语句的结果"
+        - name: "IsDDL"
+          signature: "IsDDL(sql string) bool"
+          description: "判断 SQL 是否为 DDL 语句（CREATE/ALTER/DROP/TRUNCATE/RENAME）"
+        - name: "Cancel"
+          signature: "Cancel()"
+          description: "取消当前正在执行的查询"
+
+# ============================================================
+# 7. history — 命令历史
+# ============================================================
+history:
+  package: "mysh/history"
+  interfaces:
+    - name: "History"
+      description: "命令历史管理器"
+      methods:
+        - name: "Append"
+          signature: "Append(entry string) error"
+          description: "追加一条历史记录，持久化到文件"
+        - name: "Search"
+          signature: "Search(pattern string) []string"
+          description: "按模式搜索历史记录，pattern 支持 substring 匹配"
+        - name: "List"
+          signature: "List(limit int) []string"
+          description: "返回最近 N 条历史记录，limit<=0 返回全部"
+        - name: "Clear"
+          signature: "Clear() error"
+          description: "清空历史记录"
+        - name: "Len"
+          signature: "Len() int"
+          description: "历史记录条数"
+
+# ============================================================
+# 8. output — 结果格式化输出
+# ============================================================
+output:
+  package: "mysh/output"
+  interfaces:
+    - name: "Format"
+      description: "输出格式枚举"
+      values:
+        - "Table"
+        - "Vertical"
+        - "JSON"
+
+    - name: "Formatter"
+      description: "结果格式化接口"
+      methods:
+        - name: "Format"
+          signature: "Format(result *executor.QueryResult) (string, error)"
+          description: "将查询结果格式化为字符串"
+
+    - name: "NewFormatter"
+      signature: "NewFormatter(format Format) Formatter"
+      description: "工厂函数，根据格式类型创建 Formatter"
+
+# ============================================================
+# 9. editor — 行编辑器
+# ============================================================
+editor:
+  package: "mysh/editor"
+  interfaces:
+    - name: "Editor"
+      description: "行编辑器，管理输入缓冲区、光标位置、多行文本"
+      methods:
+        - name: "Insert"
+          signature: "Insert(text string)"
+          description: "在光标位置插入文本"
+        - name: "Delete"
+          signature: "Delete(n int)"
+          description: "删除光标后 n 个字符"
+        - name: "Backspace"
+          signature: "Backspace(n int)"
+          description: "删除光标前 n 个字符"
+        - name: "MoveLeft"
+          signature: "MoveLeft()"
+        - name: "MoveRight"
+          signature: "MoveRight()"
+        - name: "MoveHome"
+          signature: "MoveHome()"
+        - name: "MoveEnd"
+          signature: "MoveEnd()"
+        - name: "Text"
+          signature: "Text() string"
+          description: "返回当前完整文本"
+        - name: "CursorPos"
+          signature: "CursorPos() int"
+          description: "返回当前光标位置（基于完整文本的偏移量）"
+        - name: "Clear"
+          signature: "Clear()"
+        - name: "SetText"
+          signature: "SetText(text string)"
+        - name: "LineCount"
+          signature: "LineCount() int"
+          description: "当前文本行数"
+        - name: "CurrentLine"
+          signature: "CurrentLine() int"
+          description: "光标所在行号（0-based）"
+
+# ============================================================
+# 10. tui — 界面集成
+# ============================================================
+tui:
+  package: "mysh/tui"
+  interfaces:
+    - name: "Model"
+      description: "bubbletea 主 Model，组合各子模块"
+      methods:
+        - name: "Init"
+          signature: "Init() tea.Cmd"
+          description: "bubbletea Init"
+        - name: "Update"
+          signature: "Update(msg tea.Msg) (tea.Model, tea.Cmd)"
+          description: "bubbletea Update"
+        - name: "View"
+          signature: "View() string"
+          description: "bubbletea View"
+
+    - name: "Deps"
+      description: "TUI 依赖注入容器"
+      fields:
+        - name: "Config"
+          type: "*config.Config"
+        - name: "Pool"
+          type: "connection.Pool"
+        - name: "Metadata"
+          type: "metadata.Cache"
+        - name: "History"
+          type: "history.History"
+        - name: "Executor"
+          type: "executor.Executor"
+        - name: "Highlighter"
+          type: "highlight.Highlighter"
+        - name: "Completer"
+          type: "completer.Completer"
+        - name: "Formatter"
+          type: "output.Formatter"
+
+# ============================================================
+# 模块依赖关系
+# ============================================================
+dependencies:
+  main:
+    - config
+    - connection
+    - tui
+    - history
+  tui:
+    - editor
+    - highlight
+    - completer
+    - executor
+    - output
+  completer:
+    - metadata
+    - highlight
+  executor:
+    - connection
+    - metadata
+    - history
+    - output
+  metadata:
+    - connection
+  highlight: []
+  editor: []
+  history: []
+  output:
+    - executor
+  connection:
+    - config

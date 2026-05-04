@@ -30,3 +30,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Build output
+mysh
+
+# Project tooling
+.ai-rd-team/
+.codebuddy/
