@@ -83,7 +83,7 @@ download_binary() {
     local filename="mysh-${os}-${arch}${ext}"
     local url="${GITHUB_BASE}/releases/download/${version}/${filename}"
 
-    info "Downloading mysh ${version} for ${os}/${arch}..."
+    info "Downloading mysh ${version} for ${os}/${arch}..." >&2
     local tmp_file
     tmp_file=$(mktemp)
 
@@ -92,7 +92,7 @@ download_binary() {
 
     if [ "$http_code" != "200" ]; then
         rm -f "$tmp_file"
-        warn "Download failed (HTTP ${http_code:-unknown})"
+        warn "Download failed (HTTP ${http_code:-unknown})" >&2
         return 1
     fi
 
@@ -101,7 +101,7 @@ download_binary() {
     file_size=$(wc -c < "$tmp_file" 2>/dev/null | tr -d ' ' || echo "0")
     if [ "$file_size" -lt 1048576 ]; then
         rm -f "$tmp_file"
-        warn "Downloaded file is too small (${file_size} bytes), likely not a valid binary"
+        warn "Downloaded file is too small (${file_size} bytes), likely not a valid binary" >&2
         return 1
     fi
 
