@@ -317,33 +317,50 @@ Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syn
 
 | Command | Description |
 |---------|-------------|
-| `\help` | Show help |
-| `\connect <dsn>` | Connect to a database |
-| `\reconnect` | Reconnect to the current server |
+| `\help`, `\h`, `\?` | Show help |
+| `\quit`, `\q` | Exit mysh |
+| `\clear`, `\c` | Clear screen output |
+| `\status`, `\s` | Show connection status |
 | `\use <db>` | Switch database |
-| `\refresh` | Refresh metadata cache |
-| `\status` | Show connection status |
-| `\format table\|vertical\|json\|markdown` | Change output format |
-| `\history [pattern]` | Search command history |
+| `\refresh`, `\r` | Refresh metadata cache |
+| `\format [type]` | Set/show output format (table, vertical, json, markdown) |
+| `\history [pattern]` | Search/show command history |
+| `\connect <dsn>` | Connect to a database (user@host:port/db or just db) |
+| `\reconnect` | Reconnect to the current server |
+| `\desc <t> [mode]` | Describe table (columns, full, indexes, create) |
 | `\source <file>` | Execute SQL from file |
 | `\edit`, `\e` | Open external editor to edit/execute SQL |
 | `\pipe`, `\| <cmd>` | Pipe last query result to a system command |
+| `\copy <what>` | Copy to clipboard (result, query, sql) |
 | `\timing` | Toggle query execution time display |
-| `\export <file> [csv\|json\|markdown]` | Export last query result to file |
-| `\watch [seconds] [SQL]` | Re-execute query at intervals (default 5s) |
+| `\safe-updates [on\|off]` | Toggle safe-updates mode (block UPDATE/DELETE without WHERE/LIMIT) |
+| `\slow [seconds]` | Set/show slow query warning threshold (0 = disabled) |
+| `\export <file> [fmt]` | Export last query result to file (csv, json, markdown) |
+| `\watch [sec] [SQL]` | Re-execute query at intervals (default 5s, Ctrl+C stop) |
 | `\alias [name sql]` | Show/set command aliases |
 | `\unalias <name>` | Remove temporary alias |
 | `\session` | List saved sessions |
 | `\session <name>` | Switch to saved session |
 | `\session save <name>` | Save current connection as session |
-| `\session delete <name>` | Delete a saved session |
+| `\session del <name>` | Delete a saved session |
 | `\fav`, `\favorites` | List favorite queries |
 | `\fav <name>` | Execute a saved favorite |
 | `\fav + <name> [desc]` | Save last query as favorite |
 | `\fav - <name>` | Delete a favorite |
 | `\fav show <name>` | Show favorite SQL |
 | `\mouse` | Toggle mouse mode |
-| `\quit` | Exit mysh |
+| `\cd [dir]` | Change/show working directory (for \source, \sys) |
+| `\sys`, `\! <cmd>` | Execute a system command |
+
+### Format Suffixes
+
+Append to any SQL statement to override the output format for that query:
+
+| Suffix | Format | Example |
+|--------|--------|---------|
+| `\G` | Vertical (one column per line) | `SELECT * FROM users\G` |
+| `\j` | JSON array | `SELECT * FROM users\j` |
+| `\m` | Markdown table | `SELECT * FROM users\m` |
 
 ## Auto-Completion Context
 

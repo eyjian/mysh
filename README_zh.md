@@ -265,28 +265,50 @@ sessions:
 
 | 命令 | 说明 |
 |------|------|
-| `\help` | 显示帮助 |
-| `\connect <dsn>` | 连接数据库 |
-| `\reconnect` | 重新连接当前服务器 |
+| `\help`, `\h`, `\?` | 显示帮助 |
+| `\quit`, `\q` | 退出 mysh |
+| `\clear`, `\c` | 清屏 |
+| `\status`, `\s` | 显示连接状态 |
 | `\use <db>` | 切换数据库 |
-| `\refresh` | 刷新元数据缓存 |
-| `\status` | 显示连接状态 |
-| `\format table\|vertical\|json\|markdown` | 更改输出格式 |
-| `\history [pattern]` | 搜索命令历史 |
+| `\refresh`, `\r` | 刷新元数据缓存 |
+| `\format [type]` | 设置/查看输出格式（table, vertical, json, markdown） |
+| `\history [pattern]` | 搜索/查看命令历史 |
+| `\connect <dsn>` | 连接数据库（user@host:port/db 或仅 db） |
+| `\reconnect` | 重新连接当前服务器 |
+| `\desc <t> [mode]` | 查看表结构（columns, full, indexes, create） |
 | `\source <file>` | 从文件执行 SQL |
 | `\edit`, `\e` | 打开外部编辑器编辑/执行 SQL |
 | `\pipe`, `\| <cmd>` | 将查询结果管道到系统命令 |
+| `\copy <what>` | 复制到剪贴板（result, query, sql） |
 | `\timing` | 切换查询执行耗时显示 |
-| `\export <file> [csv\|json\|markdown]` | 导出最后一次查询结果到文件 |
-| `\watch [秒] [SQL]` | 定期重执行查询（默认 5 秒） |
+| `\safe-updates [on\|off]` | 切换安全更新模式（阻止没有 WHERE/LIMIT 的 UPDATE/DELETE） |
+| `\slow [seconds]` | 设置/查看慢查询警告阈值（0 = 禁用） |
+| `\export <file> [fmt]` | 导出最后一次查询结果到文件（csv, json, markdown） |
+| `\watch [秒] [SQL]` | 定期重执行查询（默认 5 秒，Ctrl+C 停止） |
 | `\alias [name sql]` | 查看/设置命令别名 |
 | `\unalias <name>` | 删除临时别名 |
 | `\session` | 列出已保存会话 |
 | `\session <name>` | 切换到已保存会话 |
 | `\session save <name>` | 保存当前连接为会话 |
-| `\session delete <name>` | 删除已保存会话 |
+| `\session del <name>` | 删除已保存会话 |
+| `\fav`, `\favorites` | 列出收藏查询 |
+| `\fav <name>` | 执行已收藏的查询 |
+| `\fav + <name> [desc]` | 将最后一次查询保存为收藏 |
+| `\fav - <name>` | 删除收藏 |
+| `\fav show <name>` | 查看收藏的 SQL |
 | `\mouse` | 切换鼠标模式 |
-| `\quit` | 退出 mysh |
+| `\cd [dir]` | 切换/查看工作目录（用于 \source、\sys） |
+| `\sys`, `\! <cmd>` | 执行系统命令 |
+
+### 格式后缀
+
+在任何 SQL 语句后追加格式后缀，可覆盖该查询的输出格式：
+
+| 后缀 | 格式 | 示例 |
+|------|------|------|
+| `\G` | 垂直格式（每列一行） | `SELECT * FROM users\G` |
+| `\j` | JSON 数组 | `SELECT * FROM users\j` |
+| `\m` | Markdown 表格 | `SELECT * FROM users\m` |
 
 ## 自动补全上下文
 
