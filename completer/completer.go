@@ -138,6 +138,30 @@ func (c *Completer) Complete(ctx context.Context, input string, cursorPos int) (
 		candidates = candidates[:c.cfg.MaxSuggestions]
 	}
 
+	// Append snippet suggestions when results are sparse
+	if len(candidates) == 0 || len(candidates) < 3 {
+		word := c.extractPrefix(input, cursorPos)
+		if word != "" {
+			for _, snippet := range MatchingSnippets(word) {
+				// Skip if same-named keyword already exists
+				found := false
+				for _, s := range candidates {
+					if strings.EqualFold(s.Text, snippet.Trigger) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					candidates = append(candidates, Suggestion{
+						Text:   snippet.Trigger,
+						Type:   SuggestKeyword,
+						Detail: "✦ " + snippet.Description,
+					})
+				}
+			}
+		}
+	}
+
 	return candidates, nil
 }
 

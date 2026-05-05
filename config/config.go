@@ -1,20 +1,27 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/viper"
+	"go.yaml.in/yaml/v3"
 )
 
 // Config holds all configuration for mysh.
 type Config struct {
-	Connection ConnectionConfig `mapstructure:"connection"`
-	UI         UIConfig         `mapstructure:"ui"`
-	Theme      ThemeConfig      `mapstructure:"theme"`
-	History    HistoryConfig    `mapstructure:"history"`
-	Completion CompletionConfig `mapstructure:"completion"`
+	Connection ConnectionConfig         `mapstructure:"connection"`
+	UI         UIConfig                 `mapstructure:"ui"`
+	Theme      ThemeConfig              `mapstructure:"theme"`
+	History    HistoryConfig            `mapstructure:"history"`
+	Completion CompletionConfig         `mapstructure:"completion"`
+	Aliases    map[string]string        `mapstructure:"aliases"`
+	Sessions   map[string]SessionConfig `mapstructure:"sessions"`
+
+	// Internal: path to config file (for Save)
+	configPath string `mapstructure:"-"`
 }
 
 // ConnectionConfig holds MySQL connection parameters.
@@ -54,6 +61,32 @@ type HistoryConfig struct {
 type CompletionConfig struct {
 	MinChars       int `mapstructure:"min_chars"`
 	MaxSuggestions int `mapstructure:"max_suggestions"`
+}
+
+// SessionConfig holds a saved database session connection config.
+type SessionConfig struct {
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	User     string `mapstructure:"user"`
+	Password string `mapstructure:"password"`
+	Database string `mapstructure:"database"`
+	Charset  string `mapstructure:"charset"`
+}
+
+// ToConnectionConfig converts a SessionConfig to a ConnectionConfig.
+func (s SessionConfig) ToConnectionConfig() ConnectionConfig {
+	port := s.Port
+	if port == 0 {
+		port = 3306
+	}
+	return ConnectionConfig{
+		Host:     s.Host,
+		Port:     port,
+		User:     s.User,
+		Password: s.Password,
+		Database: s.Database,
+		Charset:  s.Charset,
+	}
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -151,6 +184,16 @@ func Load() (*Config, error) {
 	// Expand ~ in file paths
 	cfg.History.File = expandHome(cfg.History.File)
 
+	// Record config file path for Save
+	if v.ConfigFileUsed() != "" {
+		cfg.configPath = v.ConfigFileUsed()
+	} else {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			cfg.configPath = filepath.Join(home, ".mysh.yaml")
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -211,4 +254,22 @@ func itoa(n int) string {
 		digits = append([]byte{'-'}, digits...)
 	}
 	return string(digits)
+}
+
+// Save writes the config back to the YAML file.
+func Save(cfg *Config) error {
+	if cfg == nil || cfg.configPath == "" {
+		return fmt.Errorf("cannot save: no config file path")
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(cfg.configPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
 }

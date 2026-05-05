@@ -10,9 +10,14 @@ An enhanced MySQL command-line client that provides real-time SQL syntax highlig
 
 - **Syntax Highlighting** — Real-time coloring of SQL keywords, strings, numbers, comments, functions, and operators
 - **Smart Auto-Completion** — Context-aware suggestions for keywords, table names, column names, and database names
+- **SQL Snippets** — Built-in templates for CREATE TABLE, ALTER, INSERT, etc., auto-expand on Tab
 - **Interactive Editor** — Multi-line editing with cursor movement, history navigation, and selection
 - **Command History** — Persistent history with search (`Ctrl+R`), navigation (Up/Down), and deduplication
-- **Multiple Output Formats** — Table (default), vertical (`\G`), and JSON (`\j`) result formatting
+- **Multiple Output Formats** — Table (default), vertical (`\G`), JSON (`\j`), and Markdown (`\m`) result formatting
+- **Result Export** — Export query results to CSV, JSON, or Markdown files via `\export`
+- **Live Watch** — Periodically re-execute queries with `\watch` for real-time monitoring
+- **SQL Aliases** — Define shortcuts for frequently used queries in config or interactively
+- **Session Management** — Save, switch, and delete database connection profiles via `\session`
 - **Schema Metadata Cache** — Auto-cached table/column info with lazy refresh after DDL statements
 - **Configurable Themes** — Customizable color schemes via `~/.mysh.yaml`
 - **Zero Runtime Dependencies** — Single static binary, no CGO required
@@ -111,10 +116,10 @@ mysh> SELECT id, name
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Ctrl+Space` | Trigger auto-completion |
+| `Tab` / `Ctrl+Space` | Trigger auto-completion (snippets expand on single match) |
 | `Up` / `Down` | Navigate history |
 | `Ctrl+R` | Search history |
-| `Ctrl+C` | Cancel current input |
+| `Ctrl+C` | Cancel query/watch or clear input |
 | `Ctrl+D` | Exit mysh |
 | `Home` / `Ctrl+A` | Move cursor to beginning |
 | `End` / `Ctrl+E` | Move cursor to end |
@@ -127,6 +132,60 @@ mysh> SELECT id, name
 | (default) | Aligned table | `SELECT * FROM users;` |
 | `\G` | Vertical (one column per line) | `SELECT * FROM users\G` |
 | `\j` | JSON array | `SELECT * FROM users\j` |
+| `\m` | Markdown table | `SELECT * FROM users\m` |
+
+### Export Query Results
+
+Export the last query result to a file:
+
+```sql
+mysh> SELECT * FROM users;
+mysh> \export ~/users.csv
+mysh> \export ~/users.json json
+mysh> \export ~/users.md markdown
+```
+
+File format is auto-inferred from the extension (`.csv`, `.json`, `.md`), or specified explicitly.
+
+### Live Watch Mode
+
+Repeatedly execute a query at intervals for real-time monitoring:
+
+```sql
+mysh> \watch 2 SELECT COUNT(*) FROM processes;
+mysh> \watch 5                    -- re-execute last query every 5 seconds
+```
+
+Press `Ctrl+C` to stop watching.
+
+### SQL Aliases
+
+Define shortcuts for frequently used queries:
+
+```sql
+mysh> \alias top10 SELECT * FROM users ORDER BY score DESC LIMIT 10
+mysh> top10                        -- expands to the full SQL
+```
+
+Or configure in `~/.mysh.yaml`:
+
+```yaml
+aliases:
+  top10: "SELECT * FROM users ORDER BY score DESC LIMIT 10"
+  active: "SELECT * FROM users WHERE status = 'active'"
+```
+
+### Session Management
+
+Save and switch between multiple database connections:
+
+```sql
+mysh> \session save prod           -- save current connection as "prod"
+mysh> \session save staging        -- save another as "staging"
+mysh> \session prod                -- switch to "prod"
+mysh> \session                     -- list all saved sessions
+mysh> \session del staging         -- delete a session
+```
 
 ## Configuration
 
@@ -165,6 +224,24 @@ history:
 completion:
   min_chars: 2           # Minimum characters to trigger
   max_suggestions: 15
+
+# SQL aliases
+aliases:
+  top10: "SELECT * FROM users ORDER BY score DESC LIMIT 10"
+  active: "SELECT * FROM users WHERE status = 'active'"
+
+# Saved sessions
+sessions:
+  prod:
+    host: "db.prod.example.com"
+    port: 3306
+    user: "admin"
+    database: "myapp"
+  staging:
+    host: "db.staging.example.com"
+    port: 3306
+    user: "dev"
+    database: "myapp_dev"
 ```
 
 Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syntax: `bold`, `italic`, `underline`, `dim`, plus color names (`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`) or hex codes (`#ff0000`).
@@ -175,12 +252,22 @@ Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syn
 |---------|-------------|
 | `\help` | Show help |
 | `\connect <dsn>` | Connect to a database |
+| `\reconnect` | Reconnect to the current server |
 | `\use <db>` | Switch database |
 | `\refresh` | Refresh metadata cache |
 | `\status` | Show connection status |
-| `\format table\|vertical\|json` | Change output format |
+| `\format table\|vertical\|json\|markdown` | Change output format |
 | `\history [pattern]` | Search command history |
 | `\source <file>` | Execute SQL from file |
+| `\export <file> [csv\|json\|markdown]` | Export last query result to file |
+| `\watch [seconds] [SQL]` | Re-execute query at intervals (default 5s) |
+| `\alias [name sql]` | Show/set command aliases |
+| `\unalias <name>` | Remove temporary alias |
+| `\session` | List saved sessions |
+| `\session <name>` | Switch to saved session |
+| `\session save <name>` | Save current connection as session |
+| `\session delete <name>` | Delete a saved session |
+| `\mouse` | Toggle mouse mode |
 | `\quit` | Exit mysh |
 
 ## Auto-Completion Context
@@ -189,7 +276,7 @@ mysh provides context-aware suggestions based on your cursor position:
 
 | Context | Suggestions |
 |---------|-------------|
-| Statement start | SQL keywords, built-in commands |
+| Statement start | SQL keywords, built-in commands, SQL snippets |
 | After `SELECT` | Column names, functions, `DISTINCT`, `*` |
 | After `FROM` | Table names, database names, `WHERE`/`JOIN` keywords |
 | After `WHERE` / `AND` / `OR` | Column names, operators, functions |
@@ -197,6 +284,22 @@ mysh provides context-aware suggestions based on your cursor position:
 | After `table.` | Column names of that table, `*` |
 | After `SET` | Database names, `NAMES`/`AUTOCOMMIT` |
 | After `ORDER BY` / `GROUP BY` | Column names, `ASC`/`DESC` |
+
+### Built-in SQL Snippets
+
+When auto-completion has few matches, snippet templates are suggested. Press `Tab` on a single match to expand:
+
+| Trigger | Template |
+|---------|----------|
+| `CREATE TABLE` | `CREATE TABLE ... (id INT PRIMARY KEY, ...)` |
+| `ALTER TABLE` | `ALTER TABLE ... ADD COLUMN ...` |
+| `INSERT INTO` | `INSERT INTO ... (...) VALUES (...)` |
+| `UPDATE` | `UPDATE ... SET ... WHERE ...` |
+| `DELETE FROM` | `DELETE FROM ... WHERE ...` |
+| `CREATE INDEX` | `CREATE INDEX ... ON ... (...)` |
+| `CREATE USER` | `CREATE USER ... IDENTIFIED BY ...` |
+| `GRANT` | `GRANT ... ON ... TO ...` |
+| `SELECT INTO` | `SELECT ... INTO OUTFILE ...` |
 
 ## Architecture
 

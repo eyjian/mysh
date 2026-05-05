@@ -71,6 +71,9 @@ type Model struct {
 	// Auto vertical output
 	autoVerticalOutput bool // true = switch to vertical if result wider than terminal
 
+	// Connection health state
+	connected bool // true = last health check was successful
+
 	// History search state (Ctrl+R)
 	historySearch    bool     // true when in incremental history search mode
 	searchQuery      string   // current search query
@@ -80,6 +83,21 @@ type Model struct {
 	// Async execution state
 	execStart     time.Time // when the current query started executing
 	spinnerFrame  int       // current frame index of the spinner animation
+
+	// Last query result (for \export and \watch)
+	lastResult *executor.QueryResult
+	lastQuery  string
+	lastFormat output.Format
+
+	// Watch mode state
+	watching      bool
+	watchInterval time.Duration
+	watchQuery    string
+	watchFormat   output.Format
+	watchTick     int
+
+	// Alias state
+	tempAliases map[string]string // session-only aliases
 
 	// Pagination state
 	pagedResult *executor.QueryResult // result being paginated (nil = not paginating)
@@ -110,6 +128,7 @@ func NewModel(deps Dependencies) Model {
 		cursorOn:     true,
 		mouseEnabled:        false,
 		autoVerticalOutput:  deps.AutoVerticalOutput,
+		connected:           true,
 		promptStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
 		outputStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
 		errorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
@@ -122,7 +141,10 @@ func NewModel(deps Dependencies) Model {
 
 // Init implements tea.Model.
 func (m Model) Init() tea.Cmd {
-	return blinkCmd()
+	return tea.Batch(
+		blinkCmd(),
+		healthCheckCmd(),
+	)
 }
 
 // blinkMsg is sent by the cursor blink timer.
@@ -132,6 +154,16 @@ type blinkMsg time.Time
 func blinkCmd() tea.Cmd {
 	return tea.Tick(530*time.Millisecond, func(t time.Time) tea.Msg {
 		return blinkMsg(t)
+	})
+}
+
+// healthCheckMsg is sent periodically to check connection status.
+type healthCheckMsg time.Time
+
+// healthCheckCmd returns a command that checks connection health every 30 seconds.
+func healthCheckCmd() tea.Cmd {
+	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg {
+		return healthCheckMsg(t)
 	})
 }
 
@@ -148,6 +180,16 @@ type execResultMsg struct {
 
 // execTickMsg is sent periodically during query execution to update the timer/spinner.
 type execTickMsg time.Time
+
+// watchTickMsg is sent at each watch interval to trigger the next query.
+type watchTickMsg time.Time
+
+// watchResultMsg is sent when a watch query execution completes.
+type watchResultMsg struct {
+	result *executor.QueryResult
+	err    error
+	tick   int
+}
 
 // spinnerFrames holds the braille spinner animation frames.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -170,6 +212,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursorOn = !m.cursorOn
 		return m, blinkCmd()
 
+	case healthCheckMsg:
+		if m.deps.Pool != nil {
+			m.connected = m.deps.Pool.IsConnected()
+		}
+		return m, healthCheckCmd()
+
 	case tickMsg:
 		m.executing = false
 		return m, nil
@@ -189,6 +237,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
+
+	case watchTickMsg:
+		if m.watching {
+			m.watchTick++
+			return m, m.executeWatchQuery(m.watchTick)
+		}
+		return m, nil
+
+	case watchResultMsg:
+		if !m.watching {
+			return m, nil
+		}
+		// Clear output and show only the latest watch result
+		m.output = nil
+		m.scrollOffset = 0
+		m.addOutput(fmt.Sprintf("\033[2m--- Watch #%d (%s) ---\033[0m", msg.tick, time.Now().Format("15:04:05")))
+
+		if msg.err != nil {
+			m.addOutput(fmt.Sprintf("Error: %s", msg.err))
+		} else {
+			m.displayQueryResult(msg.result, msg.err, m.watchFormat)
+		}
+
+		// Schedule next tick
+		return m, watchTickCmd(m.watchInterval)
 	}
 
 	return m, nil
@@ -239,6 +312,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.Type {
 	case tea.KeyCtrlC:
+		if m.watching {
+			m.watching = false
+			m.watchQuery = ""
+			m.addOutput("Watch stopped.")
+			return m, nil
+		}
 		if m.executing {
 			m.deps.Executor.Cancel()
 			m.executing = false
@@ -336,6 +415,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showComp = false
 		return m, nil
 
+	case tea.KeyCtrlLeft:
+		m.ed.MoveWordLeft()
+		m.showComp = false
+		return m, nil
+
+	case tea.KeyCtrlRight:
+		m.ed.MoveWordRight()
+		m.showComp = false
+		return m, nil
+
 	case tea.KeyHome:
 		m.ed.MoveHome()
 		return m, nil
@@ -397,6 +486,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(msg.Runes) == 1 && msg.Runes[0] < 32 {
 			return m.handleCtrlRune(msg.Runes[0])
 		}
+		// Handle Alt+key sequences
+		if msg.Alt && len(msg.Runes) == 1 {
+			switch msg.Runes[0] {
+			case 'd':
+				m.ed.KillWordForward()
+				m.showComp = false
+				return m, nil
+			case 'b':
+				m.ed.MoveWordLeft()
+				m.showComp = false
+				return m, nil
+			case 'f':
+				m.ed.MoveWordRight()
+				m.showComp = false
+				return m, nil
+			}
+		}
 		m.ed.Insert(string(msg.Runes))
 		m.showComp = false
 		return m, nil
@@ -440,11 +546,8 @@ func (m Model) handleCtrlRune(r rune) (tea.Model, tea.Cmd) {
 			m.ed.SetText(string(text[pos:]))
 		}
 		m.showComp = false
-	case 23: // Ctrl+W — delete word backward
-		word := m.ed.WordBeforeCursor()
-		if word != "" {
-			m.ed.Backspace(len([]rune(word)))
-		}
+	case 23: // Ctrl+W — kill word backward
+		m.ed.KillWordBackward()
 		m.showComp = false
 	default:
 		// Ignore other control characters
@@ -581,6 +684,21 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.handleBackslashCommand(trimmed)
 	}
 
+	// Check for aliases (before SQL execution)
+	fields := strings.Fields(trimmed)
+	if len(fields) > 0 {
+		if sql, ok := m.resolveAlias(fields[0]); ok {
+			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, fields[0]))
+			expanded := sql
+			if rest != "" {
+				expanded = sql + " " + rest
+			}
+			m.addOutput(fmt.Sprintf("\033[2m→ %s\033[0m", expanded))
+			m.ed.Clear()
+			return m.executeInput(expanded, output.FormatTable)
+		}
+	}
+
 	// Check for built-in SQL-style commands (quit/exit/clear/source, with or without trailing ;)
 	cmd := strings.TrimRight(trimmed, ";")
 	lowerCmd := strings.ToLower(cmd)
@@ -712,9 +830,22 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 
 	case "\\connect":
 		if len(parts) < 2 {
-			m.addOutput("Usage: \\connect <dsn>")
+			m.addOutput("Usage: \\connect <dsn> | \\connect <host> <port> <user> <database>")
+			m.addOutput("  DSN format: user@host:port/database")
+			m.addOutput("  Shorthand:  database (reconnect to same server)")
 		} else {
-			m.addOutput("\\connect is not yet supported in this version.")
+			m.handleConnect(parts[1:])
+		}
+
+	case "\\reconnect":
+		if m.deps.Pool != nil {
+			m.addOutput("Reconnecting...")
+			if err := m.deps.Pool.Reconnect(); err != nil {
+				m.addOutput(fmt.Sprintf("Reconnect failed: %s", err))
+			} else {
+				m.addOutput("Reconnected successfully.")
+				m.connected = true
+			}
 		}
 
 	case "\\source":
@@ -732,6 +863,74 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 		m.addOutput("Mouse mode disabled (text selection/copy active)")
 		return m, func() tea.Msg { return tea.DisableMouse() }
+
+	case "\\export":
+		if len(parts) < 2 {
+			m.addOutput("Usage: \\export <file> [csv|json|markdown]")
+			m.addOutput("  Auto-infer from extension: .csv, .json, .md")
+			m.addOutput("  Export the last query result")
+		} else {
+			m.handleExport(parts[1:])
+		}
+
+	case "\\watch":
+		if m.executing || m.watching {
+			m.addOutput("A query or watch is already running.")
+			return m, nil
+		}
+		return m.handleWatch(parts[1:])
+
+	case "\\alias":
+		if len(parts) < 2 {
+			m.listAliases()
+		} else if len(parts) == 2 {
+			if sql, ok := m.resolveAlias(parts[1]); ok {
+				m.addOutput(fmt.Sprintf("  %s = %s", parts[1], sql))
+			} else {
+				m.addOutput(fmt.Sprintf("Alias '%s' not defined", parts[1]))
+			}
+		} else {
+			name := parts[1]
+			sql := strings.Join(parts[2:], " ")
+			if m.tempAliases == nil {
+				m.tempAliases = make(map[string]string)
+			}
+			m.tempAliases[name] = sql
+			m.addOutput(fmt.Sprintf("Alias set: %s = %s", name, sql))
+		}
+
+	case "\\unalias":
+		if len(parts) < 2 {
+			m.addOutput("Usage: \\unalias <name>")
+		} else {
+			name := parts[1]
+			if m.tempAliases != nil {
+				delete(m.tempAliases, name)
+			}
+			m.addOutput(fmt.Sprintf("Temp alias removed: %s", name))
+		}
+
+	case "\\session":
+		if len(parts) < 2 {
+			m.listSessions()
+		} else {
+			switch parts[1] {
+			case "save":
+				if len(parts) < 3 {
+					m.addOutput("Usage: \\session save <name>")
+				} else {
+					m.saveSession(parts[2])
+				}
+			case "delete", "rm", "del":
+				if len(parts) < 3 {
+					m.addOutput("Usage: \\session delete <name>")
+				} else {
+					m.deleteSession(parts[2])
+				}
+			default:
+				m.switchSession(parts[1])
+			}
+		}
 
 	default:
 		m.addOutput(fmt.Sprintf("Unknown command: %s. Type \\help for available commands.", command))
@@ -856,6 +1055,9 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 	m.execStart = time.Now()
 	m.ed.Clear()
 
+	// Save the query for \watch
+	m.lastQuery = input
+
 	// Execute asynchronously and start timer tick
 	return m, tea.Batch(
 		func() tea.Msg {
@@ -871,6 +1073,13 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 // displayQueryResult handles formatting and displaying a completed query result.
 func (m *Model) displayQueryResult(result *executor.QueryResult, err error, formatOverride output.Format) {
 	m.ed.Clear()
+
+	// Update connection health based on result
+	if err != nil && executor.IsConnectionError(err) {
+		m.connected = false
+	} else if err == nil {
+		m.connected = true
+	}
 
 	if err != nil {
 		m.addOutput(fmt.Sprintf("%s", err))
@@ -903,6 +1112,12 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 	}
 	if buf.Len() > 0 {
 		m.addOutput(strings.TrimRight(buf.String(), "\n"))
+	}
+
+	// Save last successful query result for \export and \watch
+	if err == nil && result != nil && result.IsQuery {
+		m.lastResult = result
+		m.lastFormat = outFmt
 	}
 }
 
@@ -1129,6 +1344,13 @@ func (m Model) handleTab() (tea.Model, tea.Cmd) {
 
 	// If only one suggestion, accept it immediately
 	if len(suggestions) == 1 {
+		// Check if this is a snippet trigger — expand the template
+		if snippet := completer.FindSnippetByTrigger(suggestions[0].Text); snippet != nil {
+			// Replace the current word with the full template
+			m.ed.ReplaceWordBeforeCursor(snippet.Template)
+			m.showComp = false
+			return m, nil
+		}
 		m.ed.ReplaceWordBeforeCursor(suggestions[0].Text)
 		m.showComp = false
 		return m, nil
@@ -1205,7 +1427,14 @@ func (m Model) View() string {
 		}
 	} else {
 		// Normal prompt + highlighted input with cursor
-		currentPrompt := m.prompt
+		// Connection health indicator
+		var healthIndicator string
+		if m.connected {
+			healthIndicator = "\033[32m●\033[0m " // green dot
+		} else {
+			healthIndicator = "\033[31m●\033[0m " // red dot
+		}
+		currentPrompt := healthIndicator + m.prompt
 		sb.WriteString(m.promptStyle.Render(currentPrompt))
 
 		input := m.ed.Text()
@@ -1291,6 +1520,335 @@ func (m *Model) addOutput(text string) {
 	m.output = append(m.output, lines...)
 }
 
+// handleConnect handles the \connect command to switch database connections.
+func (m *Model) handleConnect(parts []string) {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection pool available.")
+		return
+	}
+
+	var newCfg config.ConnectionConfig
+	if len(parts) == 1 && strings.Contains(parts[0], "@") {
+		// DSN format: user@host:port/database
+		parsed, parseErr := parseConnectDSN(parts[0], m.deps.Config.Connection)
+		if parseErr != nil {
+			m.addOutput(fmt.Sprintf("Invalid DSN: %s", parseErr))
+			return
+		}
+		newCfg = parsed
+	} else if len(parts) == 1 {
+		// Just a database name — reconnect to same server
+		newCfg = m.deps.Config.Connection
+		newCfg.Database = parts[0]
+	} else if len(parts) >= 4 {
+		// host port user database
+		newCfg = m.deps.Config.Connection // inherit charset, password
+		newCfg.Host = parts[0]
+		fmt.Sscanf(parts[1], "%d", &newCfg.Port)
+		newCfg.User = parts[2]
+		newCfg.Database = parts[3]
+	} else {
+		m.addOutput("Usage: \\connect <dsn> | \\connect <host> <port> <user> <database>")
+		return
+	}
+
+	// Attempt reconnection
+	m.addOutput(fmt.Sprintf("Connecting to %s@%s:%d/%s ...", newCfg.User, newCfg.Host, newCfg.Port, newCfg.Database))
+	if err := m.deps.Pool.Reset(&newCfg); err != nil {
+		m.addOutput(fmt.Sprintf("Connection failed: %s", err))
+		return
+	}
+
+	// Update config
+	m.deps.Config.Connection = newCfg
+
+	// Refresh metadata
+	if m.deps.Meta != nil {
+		m.deps.Meta.MarkDirty()
+		go m.deps.Meta.Refresh()
+	}
+
+	m.connected = true
+	m.addOutput("Connection established.")
+}
+
+// parseConnectDSN parses a DSN string in the format user@host:port/database.
+func parseConnectDSN(dsn string, current config.ConnectionConfig) (config.ConnectionConfig, error) {
+	cfg := current // inherit current settings (charset, password)
+
+	// Split user@hostpart
+	atIdx := strings.Index(dsn, "@")
+	if atIdx < 0 {
+		return cfg, fmt.Errorf("missing '@' in DSN")
+	}
+	cfg.User = dsn[:atIdx]
+	hostPart := dsn[atIdx+1:]
+
+	// Split host:port/database
+	slashIdx := strings.Index(hostPart, "/")
+	if slashIdx >= 0 {
+		cfg.Database = hostPart[slashIdx+1:]
+		hostPart = hostPart[:slashIdx]
+	}
+
+	// Split host:port
+	colonIdx := strings.LastIndex(hostPart, ":")
+	if colonIdx >= 0 {
+		cfg.Host = hostPart[:colonIdx]
+		fmt.Sscanf(hostPart[colonIdx+1:], "%d", &cfg.Port)
+	} else {
+		cfg.Host = hostPart
+		cfg.Port = 3306
+	}
+
+	return cfg, nil
+}
+
+// handleExport handles the \export command.
+func (m *Model) handleExport(parts []string) {
+	if m.lastResult == nil {
+		m.addOutput("No query result to export. Run a SELECT query first.")
+		return
+	}
+
+	filePath := parts[0]
+	// Expand ~ to home directory
+	if strings.HasPrefix(filePath, "~") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			filePath = home + filePath[1:]
+		}
+	}
+
+	var format output.ExportFormat
+	if len(parts) >= 2 {
+		f, err := output.ParseExportFormat(parts[1])
+		if err != nil {
+			m.addOutput(fmt.Sprintf("Error: %s", err))
+			return
+		}
+		format = f
+	} else {
+		f, err := output.InferExportFormat(filePath)
+		if err != nil {
+			m.addOutput(fmt.Sprintf("Error: %s", err))
+			return
+		}
+		format = f
+	}
+
+	rowCount, err := output.ExportResult(m.lastResult, filePath, format)
+	if err != nil {
+		m.addOutput(fmt.Sprintf("Export failed: %s", err))
+		return
+	}
+
+	m.addOutput(fmt.Sprintf("Exported %d rows to %s (%s format)", rowCount, filePath, format))
+}
+
+// handleWatch handles the \watch command.
+func (m Model) handleWatch(args []string) (tea.Model, tea.Cmd) {
+	// Parse interval (default 5 seconds)
+	interval := 5 * time.Second
+	if len(args) >= 1 {
+		var seconds int
+		if _, err := fmt.Sscanf(args[0], "%d", &seconds); err == nil && seconds > 0 {
+			interval = time.Duration(seconds) * time.Second
+		}
+	}
+
+	// Determine SQL: specified in args or use last query
+	query := ""
+	if len(args) >= 2 {
+		query = strings.Join(args[1:], " ")
+	} else if m.lastQuery != "" {
+		query = m.lastQuery
+	}
+
+	if query == "" {
+		m.addOutput("Usage: \\watch [seconds] [SQL]")
+		m.addOutput("  No previous query to watch. Please specify a SQL statement.")
+		return m, nil
+	}
+
+	m.watching = true
+	m.watchInterval = interval
+	m.watchQuery = query
+	m.watchFormat = m.deps.Formatter.CurrentFormat()
+	m.watchTick = 1
+
+	m.addOutput(fmt.Sprintf("Watching (every %s, Ctrl+C to stop)...", interval))
+
+	// Execute first query immediately
+	return m, tea.Batch(
+		m.executeWatchQuery(1),
+		watchTickCmd(interval),
+	)
+}
+
+// watchTickCmd returns a command that waits for the watch interval.
+func watchTickCmd(interval time.Duration) tea.Cmd {
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
+		return watchTickMsg(t)
+	})
+}
+
+// executeWatchQuery returns a command that executes the watch query.
+func (m Model) executeWatchQuery(tick int) tea.Cmd {
+	query := m.watchQuery
+	return func() tea.Msg {
+		result, err := m.deps.Executor.Execute(context.Background(), query+";")
+		return watchResultMsg{result, err, tick}
+	}
+}
+
+// resolveAlias looks up an alias, checking temp aliases first, then config aliases.
+func (m Model) resolveAlias(name string) (string, bool) {
+	if m.tempAliases != nil {
+		if sql, ok := m.tempAliases[name]; ok {
+			return sql, ok
+		}
+	}
+	if m.deps.Config.Aliases != nil {
+		if sql, ok := m.deps.Config.Aliases[name]; ok {
+			return sql, ok
+		}
+	}
+	return "", false
+}
+
+// listAliases lists all defined aliases.
+func (m Model) listAliases() {
+	count := 0
+
+	if m.deps.Config.Aliases != nil {
+		for name, sql := range m.deps.Config.Aliases {
+			m.addOutput(fmt.Sprintf("  %-15s → %s", name, sql))
+			count++
+		}
+	}
+
+	if m.tempAliases != nil {
+		for name, sql := range m.tempAliases {
+			m.addOutput(fmt.Sprintf("  %-15s → %s  \033[33m(temp)\033[0m", name, sql))
+			count++
+		}
+	}
+
+	if count == 0 {
+		m.addOutput("No aliases defined. Add aliases in ~/.mysh.yaml or use \\alias <name> <sql>.")
+	} else {
+		m.addOutput(fmt.Sprintf("%d alias(es) (config + temp)", count))
+	}
+}
+
+// listSessions lists all saved sessions.
+func (m Model) listSessions() {
+	sessions := m.deps.Config.Sessions
+	if len(sessions) == 0 {
+		m.addOutput("No saved sessions. Use \\session save <name> to save current connection.")
+		return
+	}
+
+	currentCfg := m.deps.Config.Connection
+	for name, sess := range sessions {
+		marker := " "
+		if sess.Host == currentCfg.Host && sess.Port == currentCfg.Port &&
+			sess.User == currentCfg.User && sess.Database == currentCfg.Database {
+			marker = "\033[32m*\033[0m"
+		}
+		port := sess.Port
+		if port == 0 {
+			port = 3306
+		}
+		m.addOutput(fmt.Sprintf("  %s %-12s %s@%s:%d/%s", marker, name, sess.User, sess.Host, port, sess.Database))
+	}
+}
+
+// switchSession switches to a named session.
+func (m *Model) switchSession(name string) {
+	sessions := m.deps.Config.Sessions
+	if sessions == nil {
+		m.addOutput(fmt.Sprintf("Session '%s' not found.", name))
+		return
+	}
+	sess, ok := sessions[name]
+	if !ok {
+		m.addOutput(fmt.Sprintf("Session '%s' not found. Use \\session to list all sessions.", name))
+		return
+	}
+
+	newCfg := sess.ToConnectionConfig()
+
+	if m.deps.Pool == nil {
+		m.addOutput("Cannot switch: no connection pool available.")
+		return
+	}
+
+	m.addOutput(fmt.Sprintf("Switching to session '%s': %s@%s:%d/%s ...", name, newCfg.User, newCfg.Host, newCfg.Port, newCfg.Database))
+
+	if err := m.deps.Pool.Reset(&newCfg); err != nil {
+		m.addOutput(fmt.Sprintf("Connection failed: %s", err))
+		m.connected = false
+		return
+	}
+
+	m.deps.Config.Connection = newCfg
+
+	if m.deps.Meta != nil {
+		m.deps.Meta.MarkDirty()
+		go m.deps.Meta.Refresh()
+	}
+
+	m.connected = true
+	m.addOutput("Session switched successfully.")
+}
+
+// saveSession saves the current connection as a named session.
+func (m *Model) saveSession(name string) {
+	cfg := m.deps.Config.Connection
+
+	if m.deps.Config.Sessions == nil {
+		m.deps.Config.Sessions = make(map[string]config.SessionConfig)
+	}
+
+	m.deps.Config.Sessions[name] = config.SessionConfig{
+		Host:     cfg.Host,
+		Port:     cfg.Port,
+		User:     cfg.User,
+		Password: "", // Don't save password for security
+		Database: cfg.Database,
+		Charset:  cfg.Charset,
+	}
+
+	if err := config.Save(m.deps.Config); err != nil {
+		m.addOutput(fmt.Sprintf("Save failed: %s (session is valid for this session only)", err))
+	} else {
+		m.addOutput(fmt.Sprintf("Session '%s' saved to config file.", name))
+	}
+}
+
+// deleteSession deletes a named session.
+func (m *Model) deleteSession(name string) {
+	if m.deps.Config.Sessions == nil {
+		m.addOutput("No saved sessions.")
+		return
+	}
+
+	if _, ok := m.deps.Config.Sessions[name]; !ok {
+		m.addOutput(fmt.Sprintf("Session '%s' not found.", name))
+		return
+	}
+
+	delete(m.deps.Config.Sessions, name)
+
+	if err := config.Save(m.deps.Config); err != nil {
+		m.addOutput(fmt.Sprintf("Delete save failed: %s", err))
+	} else {
+		m.addOutput(fmt.Sprintf("Session '%s' deleted.", name))
+	}
+}
+
 // formatStatus returns a human-readable connection status string.
 func (m Model) formatStatus() string {
 	var sb strings.Builder
@@ -1332,9 +1890,18 @@ Backslash commands:
   \refresh, \r      Refresh metadata cache
   \format [type]    Set/show output format (table|vertical|json|markdown)
   \history [pat]    Search/show command history
-  \connect <dsn>    Connect to a database
+  \connect <dsn>    Connect to a database (user@host:port/db or just db)
+  \reconnect        Reconnect to the current server
   \source <file>    Execute SQL from file
   \mouse            Toggle mouse mode (scroll wheel vs text selection)
+  \export <f> [fmt] Export last result to file (csv/json/markdown)
+  \watch [sec] [SQL] Watch query at intervals (default 5s, Ctrl+C stop)
+  \alias [name sql] Show/set command aliases
+  \unalias <name>   Remove temp alias
+  \session          List saved sessions
+  \session <name>   Switch to saved session
+  \session save <n> Save current connection as session
+  \session del <n>  Delete a saved session
 
 Format suffixes (append to SQL):
   \G                Display result in vertical format
@@ -1342,11 +1909,15 @@ Format suffixes (append to SQL):
   \m                Display result in Markdown format
 
 Keyboard shortcuts:
-  Tab               Auto-complete
+  Tab               Auto-complete (snippets expand on single match)
   Up/Down           Navigate history / completion list
-  Ctrl+C            Cancel current query or clear input
+  Ctrl+C            Cancel query/watch or clear input
   Ctrl+D            Exit (when input is empty)
   Ctrl+R            Incremental history search
+  Ctrl+Left/Right   Move by word
+  Ctrl+W            Kill word backward
+  Alt+D             Kill word forward
+  Alt+B/F           Move word backward/forward
   Enter             Execute SQL (ends with ;) or start multi-line
 `
 }

@@ -212,3 +212,77 @@ func isWordChar(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
 		(r >= '0' && r <= '9') || r == '_' || r == '.'
 }
+
+// isWhitespace returns true if the rune is a whitespace character.
+func isWhitespace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n'
+}
+
+// MoveWordLeft moves the cursor to the beginning of the previous word.
+func (e *Editor) MoveWordLeft() {
+	if e.cursor == 0 {
+		return
+	}
+	pos := e.cursor - 1
+	// Skip whitespace
+	for pos > 0 && isWhitespace(e.text[pos]) {
+		pos--
+	}
+	// Skip word characters
+	for pos > 0 && !isWhitespace(e.text[pos-1]) {
+		pos--
+	}
+	e.cursor = pos
+}
+
+// MoveWordRight moves the cursor to the beginning of the next word.
+func (e *Editor) MoveWordRight() {
+	if e.cursor >= len(e.text) {
+		return
+	}
+	pos := e.cursor
+	// Skip current word characters
+	for pos < len(e.text) && !isWhitespace(e.text[pos]) {
+		pos++
+	}
+	// Skip whitespace
+	for pos < len(e.text) && isWhitespace(e.text[pos]) {
+		pos++
+	}
+	e.cursor = pos
+}
+
+// KillWordBackward deletes the word (and trailing whitespace) before the cursor.
+func (e *Editor) KillWordBackward() {
+	if e.cursor == 0 {
+		return
+	}
+	pos := e.cursor - 1
+	// Skip whitespace
+	for pos > 0 && isWhitespace(e.text[pos]) {
+		pos--
+	}
+	// Skip word characters
+	for pos > 0 && !isWhitespace(e.text[pos-1]) {
+		pos--
+	}
+	e.text = append(e.text[:pos], e.text[e.cursor:]...)
+	e.cursor = pos
+}
+
+// KillWordForward deletes the word (and leading whitespace) after the cursor.
+func (e *Editor) KillWordForward() {
+	if e.cursor >= len(e.text) {
+		return
+	}
+	pos := e.cursor
+	// Skip word characters
+	for pos < len(e.text) && !isWhitespace(e.text[pos]) {
+		pos++
+	}
+	// Skip whitespace
+	for pos < len(e.text) && isWhitespace(e.text[pos]) {
+		pos++
+	}
+	e.text = append(e.text[:e.cursor], e.text[pos:]...)
+}

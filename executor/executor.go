@@ -20,6 +20,7 @@ type QueryResult struct {
 	Duration     time.Duration // Query execution time
 	IsQuery      bool          // true for SELECT/SHOW/DESCRIBE, false for DML/DDL
 	Error        error         // Error if any
+	Warning      string        // Non-critical message (e.g., "Reconnected to server")
 }
 
 // Executor handles SQL statement execution.
@@ -38,7 +39,29 @@ func New(pool *connection.Pool, meta *metadata.Cache) *Executor {
 }
 
 // Execute runs a single SQL statement and returns the result.
+// If a connection error occurs, it attempts to reconnect and retry once.
 func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, error) {
+	result, err := e.executeOnce(ctx, query)
+	if err == nil || !IsConnectionError(err) {
+		return result, err
+	}
+
+	// Connection error — try to reconnect once
+	if e.pool != nil {
+		if reconnErr := e.pool.Reconnect(); reconnErr != nil {
+			return nil, fmt.Errorf("connection lost and reconnect failed: %w", reconnErr)
+		}
+		// Retry the query after reconnection
+		result, err = e.executeOnce(ctx, query)
+		if err == nil {
+			result.Warning = "Reconnected to server"
+		}
+	}
+	return result, err
+}
+
+// executeOnce runs a single SQL statement without retry logic.
+func (e *Executor) executeOnce(ctx context.Context, query string) (*QueryResult, error) {
 	start := time.Now()
 
 	// Create a cancellable context
@@ -325,4 +348,21 @@ func NullString(ns sql.NullString) string {
 		return ns.String
 	}
 	return ""
+}
+
+// IsConnectionError checks if an error is caused by a lost connection.
+func IsConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "invalid connection") ||
+		strings.Contains(msg, "bad connection") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "server has gone away") ||
+		strings.Contains(msg, "connect: connection refused") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "driver: bad conn")
 }

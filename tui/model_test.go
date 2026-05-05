@@ -314,20 +314,20 @@ func TestBackslashCommand_ConnectNoArg(t *testing.T) {
 	}
 }
 
-func TestBackslashCommand_ConnectNotSupported(t *testing.T) {
+func TestBackslashCommand_ConnectWithArg_NilPool(t *testing.T) {
 	m := newTestModel()
 	m.ed.Insert("\\connect dsn")
 	model, _ := m.handleEnter()
 	updated := model.(Model)
 	found := false
 	for _, line := range updated.output {
-		if strings.Contains(line, "not yet supported") {
+		if strings.Contains(line, "No connection pool") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'not yet supported' output after \\connect with arg")
+		t.Error("expected 'No connection pool' output after \\connect with arg and nil pool")
 	}
 }
 
@@ -658,7 +658,7 @@ func TestInit(t *testing.T) {
 	m := newTestModel()
 	cmd := m.Init()
 	if cmd == nil {
-		t.Error("expected non-nil cmd from Init (blink timer)")
+		t.Error("expected non-nil cmd from Init (blink + health check timers)")
 	}
 }
 

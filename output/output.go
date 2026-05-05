@@ -89,6 +89,11 @@ func (f *Formatter) WriteResult(result *executor.QueryResult) error {
 		return err
 	}
 
+	// Display warning if present (e.g., reconnection notice)
+	if result.Warning != "" {
+		fmt.Fprintf(f.writer, "%sWarning: %s%s\n", ansiYellow, result.Warning, ansiReset)
+	}
+
 	// Handle DML/DDL results
 	if !result.IsQuery {
 		msg := formatDMLResult(result)
