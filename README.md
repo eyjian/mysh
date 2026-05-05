@@ -204,7 +204,7 @@ connection:
 ui:
   prompt: "mysh> "
   multiline_prompt: "    -> "
-  page_size: 20          # Result pagination rows
+  page_size: 0           # Result pagination rows (0 = no pagination, like mysql CLI)
 
 # Syntax highlighting theme
 theme:

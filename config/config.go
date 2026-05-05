@@ -102,7 +102,7 @@ func DefaultConfig() *Config {
 		UI: UIConfig{
 			Prompt:          "mysh> ",
 			MultilinePrompt: "    -> ",
-			PageSize:        20,
+			PageSize:        0,
 		},
 		Theme: ThemeConfig{
 			Keyword:  "bold magenta",

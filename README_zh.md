@@ -215,7 +215,7 @@ connection:
 ui:
   prompt: "mysh> "
   multiline_prompt: "    -> "
-  page_size: 20          # 结果分页行数
+  page_size: 0           # 结果分页行数（0 = 不分页，类似 mysql CLI）
 
 # 语法高亮主题
 theme:

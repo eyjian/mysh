@@ -33,6 +33,9 @@ go.work.sum
 
 # Build output
 mysh
+mysh-darwin-*
+mysh-linux-*
+mysh-windows-*
 
 # Project tooling
 .ai-rd-team/

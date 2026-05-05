@@ -35,8 +35,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.UI.MultilinePrompt != "    -> " {
 		t.Errorf("default multiline_prompt = %q, want %q", cfg.UI.MultilinePrompt, "    -> ")
 	}
-	if cfg.UI.PageSize != 20 {
-		t.Errorf("default page_size = %d, want %d", cfg.UI.PageSize, 20)
+	if cfg.UI.PageSize != 0 {
+		t.Errorf("default page_size = %d, want %d", cfg.UI.PageSize, 0)
 	}
 
 	// Theme defaults
