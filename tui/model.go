@@ -678,6 +678,25 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 
 	input := m.ed.Text()
 
+	// Empty input + disconnected: auto-reconnect (like MySQL CLI)
+	if strings.TrimSpace(input) == "" && !m.connected {
+		m.addOutput("Reconnecting...")
+		if m.deps.Pool != nil {
+			if err := m.deps.Pool.Reconnect(); err != nil {
+				m.addOutput(fmt.Sprintf("Reconnect failed: %s", err))
+			} else {
+				m.connected = true
+				m.addOutput("Reconnected successfully.")
+				if m.deps.Meta != nil {
+					m.deps.Meta.MarkDirty()
+					go m.deps.Meta.Refresh()
+				}
+			}
+		}
+		m.ed.Clear()
+		return m, nil
+	}
+
 	// Check for backslash commands
 	trimmed := strings.TrimSpace(input)
 	if strings.HasPrefix(trimmed, "\\") {
@@ -1084,6 +1103,12 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 	if err != nil {
 		m.addOutput(fmt.Sprintf("%s", err))
 		return
+	}
+
+	// Show reconnection warning if auto-reconnected
+	if result != nil && result.Warning != "" {
+		m.addOutput(fmt.Sprintf("\033[33m%s\033[0m", result.Warning))
+		m.connected = true
 	}
 
 	// Choose format: use override if specified, else auto-vertical or global default
