@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -87,7 +88,7 @@ func NewModel(deps Dependencies) Model {
 		mlPrompt:     mlPrompt,
 		output:       []string{},
 		cursorOn:     true,
-		mouseEnabled: true,
+		mouseEnabled: false,
 		promptStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
 		outputStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
 		errorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
@@ -402,18 +403,30 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.handleBackslashCommand(trimmed)
 	}
 
-	// Check for built-in SQL-style commands (quit/exit/clear, with or without trailing ;)
+	// Check for built-in SQL-style commands (quit/exit/clear/source, with or without trailing ;)
 	cmd := strings.TrimRight(trimmed, ";")
-	switch strings.ToLower(cmd) {
-	case "quit", "exit":
+	lowerCmd := strings.ToLower(cmd)
+	if lowerCmd == "quit" || lowerCmd == "exit" {
 		m.ed.Clear()
 		m.quitting = true
 		return m, tea.Quit
-	case "clear":
+	}
+	if lowerCmd == "clear" {
 		m.ed.Clear()
 		m.output = nil
 		m.scrollOffset = 0
 		return m, nil
+	}
+	// Handle "source <file>" (MySQL-style command)
+	if strings.HasPrefix(lowerCmd, "source ") {
+		filePath := strings.TrimSpace(cmd[len("source "):])
+		m.addOutput(m.prompt + trimmed)
+		m.ed.Clear()
+		if filePath == "" {
+			m.addOutput("Usage: source <file>")
+			return m, nil
+		}
+		return m.execSourceFile(filePath)
 	}
 
 	// Check for \G (vertical output) suffix
@@ -443,6 +456,8 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 
 // handleBackslashCommand processes built-in backslash commands.
 func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
+	// Echo the command to output area before clearing input
+	m.addOutput(m.prompt + cmd)
 	m.ed.Clear()
 	m.multiline = false
 	parts := strings.Fields(cmd)
@@ -531,7 +546,7 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 		if len(parts) < 2 {
 			m.addOutput("Usage: \\source <file>")
 		} else {
-			m.addOutput("\\source is not yet supported in this version.")
+			return m.execSourceFile(parts[1])
 		}
 
 	case "\\mouse":
@@ -547,6 +562,89 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.addOutput(fmt.Sprintf("Unknown command: %s. Type \\help for available commands.", command))
 	}
 
+	return m, nil
+}
+
+// execSourceFile reads and executes SQL statements from a file (like MySQL's source command).
+func (m Model) execSourceFile(filePath string) (tea.Model, tea.Cmd) {
+	// Expand ~ to home directory
+	if strings.HasPrefix(filePath, "~") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			filePath = home + filePath[1:]
+		}
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		m.addOutput(fmt.Sprintf("Failed to read file: %s", err))
+		return m, nil
+	}
+
+	content := string(data)
+	ctx := context.Background()
+
+	// Split by semicolons and execute each statement
+	statements := strings.Split(content, ";")
+	successCount := 0
+	for _, stmt := range statements {
+		stmt = strings.TrimSpace(stmt)
+		// Skip empty statements and comments-only
+		if stmt == "" {
+			continue
+		}
+
+		// Handle \G (vertical output) suffix — it's a client-side format
+		// indicator, not valid SQL syntax, so strip it before execution.
+		useVertical := false
+		if strings.HasSuffix(stmt, "\\G") {
+			useVertical = true
+			stmt = strings.TrimSuffix(stmt, "\\G")
+			stmt = strings.TrimSpace(stmt)
+		}
+		if stmt == "" {
+			continue
+		}
+
+		// Skip comment-only lines
+		lines := strings.Split(stmt, "\n")
+		hasSQL := false
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "--") && !strings.HasPrefix(line, "#") {
+				hasSQL = true
+				break
+			}
+		}
+		if !hasSQL {
+			continue
+		}
+
+		result, execErr := m.deps.Executor.Execute(ctx, stmt+";")
+		if execErr != nil {
+			m.addOutput(fmt.Sprintf("%s", execErr))
+			continue
+		}
+		if result.Error != nil {
+			m.addOutput(fmt.Sprintf("%s", result.Error))
+			continue
+		}
+		successCount++
+
+		// Format and display the result
+		outFmt := m.deps.Formatter.CurrentFormat()
+		if useVertical {
+			outFmt = output.FormatVertical
+		}
+		var buf strings.Builder
+		tmpFormatter := output.NewFormatter(outFmt, &buf)
+		if err := tmpFormatter.WriteResult(result); err == nil {
+			m.addOutput(strings.TrimRight(buf.String(), "\n"))
+		}
+	}
+
+	m.addOutput(fmt.Sprintf("Source: %s (%d statements executed)", filePath, successCount))
+	m.scrollOffset = 0
 	return m, nil
 }
 

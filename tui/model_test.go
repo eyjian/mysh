@@ -197,8 +197,16 @@ func TestBackslashCommand_Status(t *testing.T) {
 	if len(updated.output) == 0 {
 		t.Error("expected output after \\status command")
 	}
-	if !strings.Contains(updated.output[0], "0.1.0") {
-		t.Errorf("expected version in status, got: %q", updated.output[0])
+	// First output is the echoed command, status content is in subsequent outputs
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "0.1.0") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected version in status output, got: %v", updated.output)
 	}
 }
 
@@ -340,20 +348,20 @@ func TestBackslashCommand_SourceNoArg(t *testing.T) {
 	}
 }
 
-func TestBackslashCommand_SourceNotSupported(t *testing.T) {
+func TestBackslashCommand_Source(t *testing.T) {
 	m := newTestModel()
-	m.ed.Insert("\\source file.sql")
+	m.ed.Insert("\\source /nonexistent/file.sql")
 	model, _ := m.handleEnter()
 	updated := model.(Model)
 	found := false
 	for _, line := range updated.output {
-		if strings.Contains(line, "not yet supported") {
+		if strings.Contains(line, "Failed to read file") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'not yet supported' output after \\source with arg")
+		t.Error("expected 'Failed to read file' output for nonexistent file")
 	}
 }
 

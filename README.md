@@ -1,5 +1,7 @@
 # mysh
 
+[中文文档](README_zh.md)
+
 MySQL CLI with syntax highlighting and intelligent auto-completion.
 
 An enhanced MySQL command-line client that provides real-time SQL syntax highlighting, context-aware auto-completion, and interactive editing on top of the standard MySQL CLI experience.

@@ -142,9 +142,11 @@ func TestParseArgs_NoArgs(t *testing.T) {
 
 func TestParseArgs_UnknownFlag(t *testing.T) {
 	resetFlags()
-	// Unknown flags should not crash, just print warning
 	os.Args = []string{"mysh", "--unknown"}
-	parseArgs()
+	err := parseArgs()
+	if err == nil {
+		t.Error("expected error for unknown flag")
+	}
 	// Should not set any flags
 	if flagHost != "" || flagPort != 0 || flagUser != "" || flagPassword != "" || flagDatabase != "" {
 		t.Error("unknown flag should not set any values")
@@ -197,4 +199,5 @@ func resetFlags() {
 	flagUser = ""
 	flagPassword = ""
 	flagDatabase = ""
+	flagExecute = ""
 }

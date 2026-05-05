@@ -32,11 +32,14 @@ var (
 	flagUser     string
 	flagPassword string
 	flagDatabase string
+	flagExecute  string
 )
 
 func main() {
 	// Parse command-line arguments (simple flag parsing, no external dependency)
-	parseArgs()
+	if err := parseArgs(); err != nil {
+		os.Exit(1)
+	}
 
 	// Step 1: Load configuration
 	cfg, err := config.Load()
@@ -75,6 +78,11 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Fprintf(os.Stderr, "OK\n")
+
+	// If -e flag is provided, execute the statement and exit (non-interactive mode)
+	if flagExecute != "" {
+		os.Exit(execBatch(pool, flagExecute))
+	}
 
 	// Step 3: Initialize metadata cache (empty initially, will load async)
 	meta, err := metadata.NewCache(pool)
@@ -134,7 +142,7 @@ func main() {
 	}
 
 	model := tui.NewModel(deps)
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
+	program := tea.NewProgram(model, tea.WithContext(ctx))
 
 	// Async: load metadata cache in background so TUI starts immediately
 	if meta != nil {
@@ -158,9 +166,49 @@ func main() {
 	}
 }
 
+// execBatch executes SQL statements in non-interactive mode (like mysql -e).
+// It supports multiple statements separated by semicolons.
+// Returns 0 on success, 1 on error.
+func execBatch(pool *connection.Pool, statements string) int {
+	exec := executor.New(pool, nil)
+	formatter := output.NewFormatter(output.FormatTable, os.Stdout)
+	ctx := context.Background()
+
+	// Split by semicolons, filter empty
+	parts := strings.Split(statements, ";")
+	hasError := false
+	for _, stmt := range parts {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		result, err := exec.Execute(ctx, stmt+";")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", err)
+			hasError = true
+			continue
+		}
+		if result.Error != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", result.Error)
+			hasError = true
+			continue
+		}
+		if err := formatter.WriteResult(result); err != nil {
+			fmt.Fprintf(os.Stderr, "Output error: %s\n", err)
+			hasError = true
+		}
+	}
+
+	pool.Close()
+	if hasError {
+		return 1
+	}
+	return 0
+}
+
 // parseArgs parses simple command-line flags.
-// Supported: -h host, -P port, -u user, -p password, -D database
-func parseArgs() {
+// Supported: -h host, -P port, -u user, -p password, -D database, -e statement
+func parseArgs() error {
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -197,10 +245,15 @@ func parseArgs() {
 				flagDatabase = args[i+1]
 				i++
 			}
-		case "--help":
+		case "-e", "--execute":
+			if i+1 < len(args) {
+				flagExecute = args[i+1]
+				i++
+			}
+		case "--help", "-help":
 			printUsage()
 			os.Exit(0)
-		case "--version":
+		case "--version", "-version":
 			fmt.Printf("mysh version %s\n", version)
 			os.Exit(0)
 		default:
@@ -208,10 +261,13 @@ func parseArgs() {
 			if strings.Contains(args[i], "@") || strings.Contains(args[i], ":") && !strings.HasPrefix(args[i], "-") {
 				fmt.Fprintf(os.Stderr, "Warning: DSN-style argument not supported, use flags instead\n")
 			} else if strings.HasPrefix(args[i], "-") {
-				fmt.Fprintf(os.Stderr, "Unknown flag: %s\n", args[i])
+				fmt.Fprintf(os.Stderr, "Unknown flag: %s\n\n", args[i])
+				printUsage()
+				return fmt.Errorf("unknown flag: %s", args[i])
 			}
 		}
 	}
+	return nil
 }
 
 // printUsage displays CLI usage information.
@@ -220,6 +276,7 @@ func printUsage() {
 
 Usage:
   mysh [options]
+  mysh [options] -e "SQL_STATEMENT"
 
 Options:
   -h, --host <host>       MySQL host (default: 127.0.0.1)
@@ -227,6 +284,7 @@ Options:
   -u, --user <user>       MySQL user (default: root)
   -p, --password <pass>   MySQL password
   -D, --database <db>     Default database
+  -e, --execute <stmt>    Execute SQL statement and exit
       --help              Show this help message
       --version           Show version
 
@@ -235,7 +293,9 @@ Configuration:
 
 Examples:
   mysh -h localhost -u root -p secret -D mydb
-  mysh --host db.example.com --port 3307 --user admin`)
+  mysh --host db.example.com --port 3307 --user admin
+  mysh -e "SHOW DATABASES"
+  mysh -u root -p secret -e "SELECT * FROM users LIMIT 10"`)
 }
 
 // cleanup performs graceful shutdown of all resources.
