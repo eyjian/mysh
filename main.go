@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"mysh/completer"
 	"mysh/config"
 	"mysh/connection"
@@ -167,6 +169,17 @@ func main() {
 		}()
 	}
 
+	// Panic recovery: restore terminal state if TUI crashes
+	defer func() {
+		if r := recover(); r != nil {
+			// Restore terminal to usable state
+			fmt.Fprintf(os.Stderr, "\033[?25h\033[0m") // show cursor, reset attributes
+			fmt.Fprintf(os.Stderr, "\nmysh crashed: %v\n", r)
+			cleanup(deps)
+			os.Exit(2)
+		}
+	}()
+
 	// Run the TUI main loop
 	_, runErr := program.Run()
 
@@ -252,13 +265,15 @@ func parseArgs() error {
 				flagPassword = args[i+1]
 				i++
 			} else {
-				// -p without argument = prompt for password (simplified: read from stdin)
+				// -p without argument = prompt for password securely
 				fmt.Fprintf(os.Stderr, "Enter password: ")
-				// In a real implementation, we'd use terminal.ReadPassword
-				// For simplicity, read from stdin
-				var pw string
-				fmt.Fscanln(os.Stdin, &pw)
-				flagPassword = pw
+				pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+				fmt.Fprintln(os.Stderr)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error reading password: %s\n", err)
+					os.Exit(1)
+				}
+				flagPassword = string(pw)
 			}
 		case "-D", "--database":
 			if i+1 < len(args) {

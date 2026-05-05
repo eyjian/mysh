@@ -71,6 +71,12 @@ type Model struct {
 	// Auto vertical output
 	autoVerticalOutput bool // true = switch to vertical if result wider than terminal
 
+	// History search state (Ctrl+R)
+	historySearch    bool     // true when in incremental history search mode
+	searchQuery      string   // current search query
+	searchResults    []string // filtered history entries matching query
+	searchResultIdx  int      // current index in searchResults
+
 	// Styles
 	promptStyle lipgloss.Style
 	outputStyle lipgloss.Style
@@ -181,6 +187,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Any key press makes cursor visible and resets blink
 	m.cursorOn = true
 
+	// If in history search mode, route keys to search handler
+	if m.historySearch {
+		return m.handleHistorySearchKey(msg)
+	}
+
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		if m.executing {
@@ -206,6 +217,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
+
+	case tea.KeyCtrlR:
+		return m.startHistorySearch()
 
 	case tea.KeyCtrlA:
 		m.ed.MoveHome()
@@ -369,6 +383,8 @@ func (m Model) handleCtrlRune(r rune) (tea.Model, tea.Cmd) {
 			m.ed.MoveEnd()
 		}
 		m.showComp = false
+	case 18: // Ctrl+R — incremental history search
+		return m.startHistorySearch()
 	case 21: // Ctrl+U — kill to beginning of line
 		pos := m.ed.CursorPos()
 		text := []rune(m.ed.Text())
@@ -387,6 +403,116 @@ func (m Model) handleCtrlRune(r rune) (tea.Model, tea.Cmd) {
 		// Ignore other control characters
 	}
 	return m, nil
+}
+
+// startHistorySearch enters the Ctrl+R incremental history search mode.
+func (m Model) startHistorySearch() (tea.Model, tea.Cmd) {
+	m.historySearch = true
+	m.searchQuery = ""
+	m.searchResults = nil
+	m.searchResultIdx = 0
+	return m, nil
+}
+
+// exitHistorySearch exits the history search mode, optionally accepting the match.
+func (m *Model) exitHistorySearch(accept bool) {
+	if accept && len(m.searchResults) > 0 && m.searchResultIdx < len(m.searchResults) {
+		m.ed.SetText(m.searchResults[m.searchResultIdx])
+	}
+	m.historySearch = false
+	m.searchQuery = ""
+	m.searchResults = nil
+	m.searchResultIdx = 0
+}
+
+// updateHistorySearch filters history entries matching the current query
+// and resets the result index.
+func (m *Model) updateHistorySearch() {
+	if m.searchQuery == "" {
+		m.searchResults = nil
+		m.searchResultIdx = 0
+		return
+	}
+	m.searchResults = m.deps.History.SearchIncremental(m.searchQuery)
+	m.searchResultIdx = 0
+}
+
+// handleHistorySearchKey handles key events while in Ctrl+R search mode.
+func (m Model) handleHistorySearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlR:
+		// Cycle to next match
+		if len(m.searchResults) > 0 {
+			m.searchResultIdx = (m.searchResultIdx + 1) % len(m.searchResults)
+		}
+		return m, nil
+
+	case tea.KeyCtrlC, tea.KeyEscape:
+		m.exitHistorySearch(false)
+		return m, nil
+
+	case tea.KeyEnter:
+		m.exitHistorySearch(true)
+		return m, nil
+
+	case tea.KeyBackspace:
+		if len(m.searchQuery) > 0 {
+			runes := []rune(m.searchQuery)
+			m.searchQuery = string(runes[:len(runes)-1])
+			m.updateHistorySearch()
+		} else {
+			m.exitHistorySearch(false)
+		}
+		return m, nil
+
+	case tea.KeyRunes:
+		m.searchQuery += string(msg.Runes)
+		m.updateHistorySearch()
+		return m, nil
+
+	default:
+		// Any other key cancels the search
+		m.exitHistorySearch(false)
+		return m, nil
+	}
+}
+
+// parseFormatSuffix checks if the input ends with a format suffix
+// (\G for vertical, \j for JSON, \m for markdown) and returns the
+// trimmed input and the format override. Returns the original input
+// and FormatTable (no override) if no suffix is found.
+func parseFormatSuffix(input string) (string, output.Format) {
+	if strings.HasSuffix(input, "\\G") {
+		return strings.TrimSpace(strings.TrimSuffix(input, "\\G")), output.FormatVertical
+	}
+	if strings.HasSuffix(input, "\\j") {
+		return strings.TrimSpace(strings.TrimSuffix(input, "\\j")), output.FormatJSON
+	}
+	if strings.HasSuffix(input, "\\m") {
+		return strings.TrimSpace(strings.TrimSuffix(input, "\\m")), output.FormatMarkdown
+	}
+	return input, output.FormatTable
+}
+
+// formatSuffixString returns the display suffix for a format override.
+func formatSuffixString(f output.Format) string {
+	switch f {
+	case output.FormatVertical:
+		return "\\G"
+	case output.FormatJSON:
+		return "\\j"
+	case output.FormatMarkdown:
+		return "\\m"
+	default:
+		return ""
+	}
+}
+
+// hasFormatSuffix returns true if the input ends with a recognized format suffix.
+func hasFormatSuffix(input string) bool {
+	return strings.HasSuffix(input, "\\G") ||
+		strings.HasSuffix(input, "\\j") ||
+		strings.HasSuffix(input, "\\m")
 }
 
 // handleEnter processes the Enter key: accepts completion if showing,
@@ -435,15 +561,11 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.execSourceFile(filePath)
 	}
 
-	// Check for \G (vertical output) suffix
-	useVertical := strings.HasSuffix(trimmed, "\\G")
-	if useVertical {
-		trimmed = strings.TrimSuffix(trimmed, "\\G")
-		trimmed = strings.TrimSpace(trimmed)
-	}
+	// Check for format suffixes: \G (vertical), \j (json), \m (markdown)
+	trimmed, formatOverride := parseFormatSuffix(trimmed)
 
-	// Multi-line: if no semicolon at end and no \G, continue input
-	if !strings.HasSuffix(trimmed, ";") && !useVertical {
+	// Multi-line: if no semicolon at end and no format suffix, continue input
+	if !strings.HasSuffix(trimmed, ";") && formatOverride == output.FormatTable {
 		// Move current input line to output area, start fresh line
 		m.addOutput(m.prompt + input)
 		m.multilineParts = append(m.multilineParts, input)
@@ -457,7 +579,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	m.showComp = false
 	fullInput := strings.Join(append(m.multilineParts, trimmed), " ")
 	m.multilineParts = nil
-	return m.executeInput(fullInput, useVertical)
+	return m.executeInput(fullInput, formatOverride)
 }
 
 // handleBackslashCommand processes built-in backslash commands.
@@ -600,14 +722,10 @@ func (m Model) execSourceFile(filePath string) (tea.Model, tea.Cmd) {
 			continue
 		}
 
-		// Handle \G (vertical output) suffix — it's a client-side format
-		// indicator, not valid SQL syntax, so strip it before execution.
-		useVertical := false
-		if strings.HasSuffix(stmt, "\\G") {
-			useVertical = true
-			stmt = strings.TrimSuffix(stmt, "\\G")
-			stmt = strings.TrimSpace(stmt)
-		}
+		// Handle format suffixes (\G, \j, \m) — client-side format indicators,
+		// not valid SQL syntax, so strip before execution.
+		var stmtFormatOverride output.Format
+		stmt, stmtFormatOverride = parseFormatSuffix(stmt)
 		if stmt == "" {
 			continue
 		}
@@ -639,8 +757,8 @@ func (m Model) execSourceFile(filePath string) (tea.Model, tea.Cmd) {
 
 		// Format and display the result
 		outFmt := m.deps.Formatter.CurrentFormat()
-		if useVertical {
-			outFmt = output.FormatVertical
+		if stmtFormatOverride != output.FormatTable {
+			outFmt = stmtFormatOverride
 		} else if m.autoVerticalOutput && outFmt == output.FormatTable && m.width > 0 {
 			if output.CalcTableWidth(result) > m.width {
 				outFmt = output.FormatVertical
@@ -659,8 +777,8 @@ func (m Model) execSourceFile(filePath string) (tea.Model, tea.Cmd) {
 }
 
 // executeInput runs the SQL statement and displays the result.
-// When useVertical is true, output is displayed in vertical format (like \G in mysql CLI).
-func (m Model) executeInput(input string, useVertical bool) (tea.Model, tea.Cmd) {
+// formatOverride specifies a per-query output format (FormatTable = use global default).
+func (m Model) executeInput(input string, formatOverride output.Format) (tea.Model, tea.Cmd) {
 	// Remove trailing semicolons
 	input = strings.TrimRight(input, ";")
 	input = strings.TrimSpace(input)
@@ -670,17 +788,17 @@ func (m Model) executeInput(input string, useVertical bool) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 
-	// Save to history (append \G if vertical output was requested)
+	// Save to history (append format suffix if override was specified)
 	historyEntry := input
-	if useVertical {
-		historyEntry = input + " \\G"
+	if suffix := formatSuffixString(formatOverride); suffix != "" {
+		historyEntry = input + " " + suffix
 	}
 	m.deps.History.Append(historyEntry)
 
 	// Echo the input line to output area (like mysql CLI)
 	displayEntry := input + ";"
-	if useVertical {
-		displayEntry = input + " \\G"
+	if suffix := formatSuffixString(formatOverride); suffix != "" {
+		displayEntry = input + " " + suffix
 	}
 	m.addOutput(m.prompt + displayEntry)
 
@@ -699,10 +817,10 @@ func (m Model) executeInput(input string, useVertical bool) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 
-	// Choose format: use vertical if \G was specified or auto-vertical-output is enabled
+	// Choose format: use override if specified, else auto-vertical or global default
 	outFmt := m.deps.Formatter.CurrentFormat()
-	if useVertical {
-		outFmt = output.FormatVertical
+	if formatOverride != output.FormatTable {
+		outFmt = formatOverride
 	} else if m.autoVerticalOutput && outFmt == output.FormatTable && m.width > 0 {
 		if output.CalcTableWidth(result) > m.width {
 			outFmt = output.FormatVertical
@@ -884,27 +1002,43 @@ func (m Model) View() string {
 		sb.WriteString("\n")
 	}
 
-	// Prompt + highlighted input with cursor
-	currentPrompt := m.prompt
-	sb.WriteString(m.promptStyle.Render(currentPrompt))
+	// Prompt line
+	if m.historySearch {
+		// Render Ctrl+R search prompt
+		searchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
+		queryStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
+		matchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 
-	input := m.ed.Text()
-	cursorPos := m.ed.CursorPos()
+		sb.WriteString(searchStyle.Render("(reverse-i-search)"))
+		sb.WriteString(queryStyle.Render("`" + m.searchQuery + "': "))
 
-	// Cursor: overlay on character at cursor position using reverse video
-	cursorStyle := lipgloss.NewStyle().Reverse(true)
-
-	if input == "" {
-		if m.cursorOn {
-			sb.WriteString(cursorStyle.Render(" "))
-		} else {
-			sb.WriteString(" ")
+		if len(m.searchResults) > 0 && m.searchResultIdx < len(m.searchResults) {
+			sb.WriteString(matchStyle.Render(m.searchResults[m.searchResultIdx]))
+		} else if m.searchQuery != "" {
+			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("no matches"))
 		}
 	} else {
-		runes := []rune(input)
-		beforeText := string(runes[:cursorPos])
+		// Normal prompt + highlighted input with cursor
+		currentPrompt := m.prompt
+		sb.WriteString(m.promptStyle.Render(currentPrompt))
 
-		if m.cursorOn && cursorPos < len(runes) {
+		input := m.ed.Text()
+		cursorPos := m.ed.CursorPos()
+
+		// Cursor: overlay on character at cursor position using reverse video
+		cursorStyle := lipgloss.NewStyle().Reverse(true)
+
+		if input == "" {
+			if m.cursorOn {
+				sb.WriteString(cursorStyle.Render(" "))
+			} else {
+				sb.WriteString(" ")
+			}
+		} else {
+			runes := []rune(input)
+			beforeText := string(runes[:cursorPos])
+
+			if m.cursorOn && cursorPos < len(runes) {
 			// Cursor overlays the character at cursorPos
 			cursorChar := string(runes[cursorPos])
 			afterText := string(runes[cursorPos+1:])
@@ -935,6 +1069,7 @@ func (m Model) View() string {
 				sb.WriteString(beforeText)
 				sb.WriteString(afterText)
 			}
+		}
 		}
 	}
 
@@ -1015,11 +1150,17 @@ Backslash commands:
   \source <file>    Execute SQL from file
   \mouse            Toggle mouse mode (scroll wheel vs text selection)
 
+Format suffixes (append to SQL):
+  \G                Display result in vertical format
+  \j                Display result in JSON format
+  \m                Display result in Markdown format
+
 Keyboard shortcuts:
   Tab               Auto-complete
   Up/Down           Navigate history / completion list
   Ctrl+C            Cancel current query or clear input
   Ctrl+D            Exit (when input is empty)
+  Ctrl+R            Incremental history search
   Enter             Execute SQL (ends with ;) or start multi-line
 `
 }

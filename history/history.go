@@ -135,6 +135,23 @@ func (h *History) Search(pattern string) []string {
 	return results
 }
 
+// SearchIncremental returns entries matching the pattern (case-insensitive substring),
+// ordered from most recent to oldest. Used by Ctrl+R incremental search for cycling.
+func (h *History) SearchIncremental(pattern string) []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	pattern = strings.ToLower(pattern)
+	var results []string
+	// Iterate from most recent (end) to oldest (beginning)
+	for i := len(h.entries) - 1; i >= 0; i-- {
+		if strings.Contains(strings.ToLower(h.entries[i]), pattern) {
+			results = append(results, h.entries[i])
+		}
+	}
+	return results
+}
+
 // Prev returns the previous entry in navigation (older entry).
 // Returns empty string if at the beginning.
 func (h *History) Prev() string {
