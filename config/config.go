@@ -24,6 +24,7 @@ type ConnectionConfig struct {
 	User     string `mapstructure:"user"`
 	Password string `mapstructure:"password"`
 	Database string `mapstructure:"database"`
+	Charset  string `mapstructure:"charset"`
 }
 
 // UIConfig holds UI-related configuration.
@@ -91,7 +92,11 @@ func DefaultConfig() *Config {
 
 // DSN returns the MySQL Data Source Name from connection config.
 func (c *ConnectionConfig) DSN() string {
-	return c.User + ":" + c.Password + "@tcp(" + c.Host + ":" + itoa(c.Port) + ")/" + c.Database
+	dsn := c.User + ":" + c.Password + "@tcp(" + c.Host + ":" + itoa(c.Port) + ")/" + c.Database
+	if c.Charset != "" {
+		dsn += "?charset=" + c.Charset
+	}
+	return dsn
 }
 
 // Load reads configuration from file and applies defaults.

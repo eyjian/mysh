@@ -202,4 +202,5 @@ func resetFlags() {
 	flagExecute = ""
 	flagAutoVerticalOutput = false
 	flagFormat = ""
+	flagCharset = ""
 }

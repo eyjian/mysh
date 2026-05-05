@@ -849,7 +849,14 @@ func (m Model) handleTab() (tea.Model, tea.Cmd) {
 // View implements tea.Model.
 func (m Model) View() string {
 	if m.quitting {
-		return "Goodbye!\n"
+		var sb strings.Builder
+		// Preserve existing output
+		for _, line := range m.output {
+			sb.WriteString(line)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("Goodbye!\n")
+		return sb.String()
 	}
 
 	var sb strings.Builder

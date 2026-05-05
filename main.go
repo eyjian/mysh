@@ -35,6 +35,7 @@ var (
 	flagExecute            string
 	flagAutoVerticalOutput bool
 	flagFormat             string
+	flagCharset            string
 )
 
 func main() {
@@ -65,6 +66,9 @@ func main() {
 	}
 	if flagDatabase != "" {
 		cfg.Connection.Database = flagDatabase
+	}
+	if flagCharset != "" {
+		cfg.Connection.Charset = flagCharset
 	}
 
 	// Step 2: Connect to MySQL
@@ -273,6 +277,11 @@ func parseArgs() error {
 				flagFormat = args[i+1]
 				i++
 			}
+		case "--default-character-set":
+			if i+1 < len(args) {
+				flagCharset = args[i+1]
+				i++
+			}
 		case "--help", "-help":
 			printUsage()
 			os.Exit(0)
@@ -309,6 +318,7 @@ Options:
   -D, --database <db>     Default database
   -e, --execute <stmt>    Execute SQL statement and exit
       --format <type>     Output format: table|vertical|json|markdown
+      --default-character-set <name> Set the default character set
       --auto-vertical-output   Auto switch to vertical if result wider than terminal
       --help              Show this help message
       --version           Show version
@@ -322,7 +332,8 @@ Examples:
   mysh -e "SHOW DATABASES"
   mysh -u root -p secret -e "SELECT * FROM users LIMIT 10"
   mysh -e "SELECT * FROM users" --format markdown
-  mysh -e "SHOW TABLES" --format json`)
+  mysh -e "SHOW TABLES" --format json
+  mysh --default-character-set utf8mb4`)
 }
 
 // cleanup performs graceful shutdown of all resources.
