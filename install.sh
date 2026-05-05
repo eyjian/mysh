@@ -20,8 +20,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+# All logging goes to stderr so $() captures only clean data
+info()  { echo -e "${GREEN}[INFO]${NC} $*" >&2; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 # Detect OS
@@ -45,9 +46,10 @@ detect_arch() {
 
 # Get latest version from GitHub release redirect
 get_latest_version() {
-    # Method 1: Follow the /releases/latest redirect URL (most reliable)
     local version
-    version=$(curl -sIL "${GITHUB_BASE}/releases/latest" 2>&1 \
+
+    # Method 1: Follow the /releases/latest redirect URL (most reliable)
+    version=$(curl -sIL "${GITHUB_BASE}/releases/latest" 2>/dev/null \
         | grep -i "location:" \
         | tail -1 \
         | sed 's/.*tag\///' \
@@ -72,6 +74,7 @@ get_latest_version() {
 }
 
 # Download binary from GitHub Releases
+# Outputs ONLY the temp file path to stdout (all messages go to stderr)
 download_binary() {
     local os="$1" arch="$2" version="$3"
 
@@ -83,7 +86,8 @@ download_binary() {
     local filename="mysh-${os}-${arch}${ext}"
     local url="${GITHUB_BASE}/releases/download/${version}/${filename}"
 
-    info "Downloading mysh ${version} for ${os}/${arch}..." >&2
+    info "Downloading mysh ${version} for ${os}/${arch}..."
+
     local tmp_file
     tmp_file=$(mktemp)
 
@@ -92,7 +96,7 @@ download_binary() {
 
     if [ "$http_code" != "200" ]; then
         rm -f "$tmp_file"
-        warn "Download failed (HTTP ${http_code:-unknown})" >&2
+        warn "Download failed (HTTP ${http_code:-unknown})"
         return 1
     fi
 
@@ -101,11 +105,12 @@ download_binary() {
     file_size=$(wc -c < "$tmp_file" 2>/dev/null | tr -d ' ' || echo "0")
     if [ "$file_size" -lt 1048576 ]; then
         rm -f "$tmp_file"
-        warn "Downloaded file is too small (${file_size} bytes), likely not a valid binary" >&2
+        warn "Downloaded file is too small (${file_size} bytes), likely not a valid binary"
         return 1
     fi
 
-    echo "$tmp_file"
+    # Only this line goes to stdout — the file path
+    printf '%s' "$tmp_file"
 }
 
 # Fallback: install via go install
@@ -130,9 +135,9 @@ go_install() {
 
 # Main install
 main() {
-    echo ""
-    echo "  mysh - MySQL CLI with syntax highlighting & auto-completion"
-    echo ""
+    echo "" >&2
+    echo "  mysh - MySQL CLI with syntax highlighting & auto-completion" >&2
+    echo "" >&2
 
     local os arch version
     os=$(detect_os)
