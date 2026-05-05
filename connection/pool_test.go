@@ -1,7 +1,9 @@
 package connection
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/eyjian/mysh/config"
 )
@@ -96,5 +98,80 @@ func TestDSN_Construction(t *testing.T) {
 	want := "root:secret@tcp(localhost:3306)/testdb"
 	if got := cfg.DSN(); got != want {
 		t.Errorf("DSN() = %q, want %q", got, want)
+	}
+}
+
+// --- IsConnectionError tests ---
+
+func TestIsConnectionError_Nil(t *testing.T) {
+	if IsConnectionError(nil) {
+		t.Error("IsConnectionError(nil) should be false")
+	}
+}
+
+func TestIsConnectionError_ServerGoneAway(t *testing.T) {
+	err := fmt.Errorf("Error 2006: MySQL server has gone away")
+	if !IsConnectionError(err) {
+		t.Error("IsConnectionError should detect 'server has gone away'")
+	}
+}
+
+func TestIsConnectionError_BadConn(t *testing.T) {
+	err := fmt.Errorf("driver: bad conn")
+	if !IsConnectionError(err) {
+		t.Error("IsConnectionError should detect 'driver: bad conn'")
+	}
+}
+
+func TestIsConnectionError_EOF(t *testing.T) {
+	err := fmt.Errorf("EOF")
+	if !IsConnectionError(err) {
+		t.Error("IsConnectionError should detect 'EOF'")
+	}
+}
+
+func TestIsConnectionError_NormalError(t *testing.T) {
+	err := fmt.Errorf("syntax error near SELECT")
+	if IsConnectionError(err) {
+		t.Error("IsConnectionError should not detect normal SQL errors")
+	}
+}
+
+func TestIsConnectionError_IOTimeout(t *testing.T) {
+	err := fmt.Errorf("i/o timeout")
+	if !IsConnectionError(err) {
+		t.Error("IsConnectionError should detect 'i/o timeout'")
+	}
+}
+
+func TestIsConnectionError_ConnectionRefused(t *testing.T) {
+	err := fmt.Errorf("connect: connection refused")
+	if !IsConnectionError(err) {
+		t.Error("IsConnectionError should detect 'connection refused'")
+	}
+}
+
+// --- ConnTimeout tests ---
+
+func TestPool_ConnTimeout(t *testing.T) {
+	// Test the timeout getter/setter via a mock approach
+	p := &Pool{connTimeout: 30 * time.Second}
+	if p.ConnTimeout() != 30*time.Second {
+		t.Errorf("ConnTimeout = %v, want 30s", p.ConnTimeout())
+	}
+	p.SetConnTimeout(60 * time.Second)
+	if p.ConnTimeout() != 60*time.Second {
+		t.Errorf("ConnTimeout after set = %v, want 60s", p.ConnTimeout())
+	}
+}
+
+func TestPool_IsIdleTooLong(t *testing.T) {
+	p := &Pool{lastActivity: time.Now()}
+	if p.IsIdleTooLong(5 * time.Minute) {
+		t.Error("Pool just created should not be idle too long")
+	}
+	p.lastActivity = time.Now().Add(-10 * time.Minute)
+	if !p.IsIdleTooLong(5 * time.Minute) {
+		t.Error("Pool idle for 10min should be idle too long for 5min threshold")
 	}
 }

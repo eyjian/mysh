@@ -57,6 +57,7 @@ type Formatter struct {
 	format     Format
 	writer     io.Writer
 	showTiming bool // whether to include execution time in output
+	maxWidth   int  // max terminal width for column truncation (0 = unlimited)
 }
 
 // NewFormatter creates a new Formatter with the given format and writer.
@@ -65,7 +66,19 @@ func NewFormatter(format Format, writer io.Writer) *Formatter {
 		format:     format,
 		writer:     writer,
 		showTiming: true, // default: show timing
+		maxWidth:   0,    // unlimited by default
 	}
+}
+
+// SetMaxWidth sets the maximum terminal width for column truncation.
+// A value of 0 means unlimited (no truncation).
+func (f *Formatter) SetMaxWidth(w int) {
+	f.maxWidth = w
+}
+
+// MaxWidth returns the current max width setting.
+func (f *Formatter) MaxWidth() int {
+	return f.maxWidth
 }
 
 // SetFormat changes the output format.
@@ -173,6 +186,9 @@ func (f *Formatter) writeTable(result *executor.QueryResult) error {
 		}
 	}
 
+	// Smart column width adjustment based on terminal width
+	widths = f.adjustColumnWidths(widths, len(result.Columns))
+
 	// Build separator line
 	separator := buildSeparator(widths)
 
@@ -182,7 +198,12 @@ func (f *Formatter) writeTable(result *executor.QueryResult) error {
 	header.WriteString("|")
 	for i, col := range result.Columns {
 		header.WriteString(" ")
-		header.WriteString(padRight(col, widths[i]))
+		w := widths[i]
+		if utf8.RuneCountInString(col) > w {
+			header.WriteString(truncateRunes(col, w))
+		} else {
+			header.WriteString(padRight(col, w))
+		}
 		header.WriteString(" |")
 	}
 	fmt.Fprintln(f.writer, header.String())
@@ -194,8 +215,14 @@ func (f *Formatter) writeTable(result *executor.QueryResult) error {
 		line.WriteString("|")
 		for i, val := range row {
 			if i < len(widths) {
+				w := widths[i]
 				line.WriteString(" ")
-				line.WriteString(padRightStyled(val, widths[i]))
+				visibleWidth := utf8.RuneCountInString(stripANSI(val))
+				if visibleWidth > w {
+					line.WriteString(truncateStyledRunes(val, w))
+				} else {
+					line.WriteString(padRightStyled(val, w))
+				}
 				line.WriteString(" |")
 			}
 		}
@@ -501,6 +528,110 @@ func padRight(s string, width int) string {
 	return s + strings.Repeat(" ", width-runeCount)
 }
 
+// adjustColumnWidths reduces column widths to fit within the terminal maxWidth.
+// It uses a smart strategy: truncate the widest columns first, keeping
+// narrower columns intact. Each column gets a minimum width of 4 chars.
+func (f *Formatter) adjustColumnWidths(widths []int, numCols int) []int {
+	if f.maxWidth <= 0 || numCols == 0 {
+		return widths
+	}
+
+	// Calculate total table width: | col1 | col2 | ... |
+	// Each column: 1 space + value + 1 space + "|" = value + 3
+	// Leading "|": 1
+	totalWidth := 1 // leading "|"
+	for _, w := range widths {
+		totalWidth += w + 3
+	}
+
+	if totalWidth <= f.maxWidth {
+		return widths // fits already
+	}
+
+	// Need to shrink. Strategy: iteratively reduce the widest column.
+	const minWidth = 4
+	result := make([]int, len(widths))
+	copy(result, widths)
+
+	for totalWidth > f.maxWidth {
+		// Find the widest column that can still be shrunk
+		widest := -1
+		widestW := 0
+		for i, w := range result {
+			if w > minWidth && w > widestW {
+				widest = i
+				widestW = w
+			}
+		}
+		if widest < 0 {
+			break // all columns are at minimum
+		}
+		result[widest]--
+		totalWidth--
+	}
+
+	return result
+}
+
+// truncateRunes truncates a plain string to at most maxRunes visible characters,
+// appending "…" if truncated.
+func truncateRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	if maxRunes <= 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
+}
+
+// truncateStyledRunes truncates a styled (ANSI) string to at most maxRunes visible
+// characters, preserving ANSI codes and appending "…" if truncated.
+func truncateStyledRunes(s string, maxRunes int) string {
+	plain := stripANSI(s)
+	if utf8.RuneCountInString(plain) <= maxRunes {
+		return s
+	}
+
+	// Walk through the styled string, counting visible runes
+	var result strings.Builder
+	visibleCount := 0
+	inEscape := false
+
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\033' {
+			inEscape = true
+			result.WriteByte(s[i])
+			continue
+		}
+		if inEscape {
+			result.WriteByte(s[i])
+			if s[i] == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+
+		// Visible character
+		r, size := utf8.DecodeRuneInString(s[i:])
+		visibleCount++
+		if visibleCount == maxRunes {
+			// Replace last char with ellipsis
+			result.WriteString("…")
+			// Close any open ANSI styles
+			result.WriteString(ansiReset)
+			break
+		} else if visibleCount > maxRunes {
+			break
+		}
+		result.WriteRune(r)
+		i += size - 1
+	}
+
+	return result.String()
+}
+
 // CalcTableWidth returns the display width (in runes) that a table-formatted
 // result would require. Returns 0 if the result has no columns.
 func CalcTableWidth(result *executor.QueryResult) int {
@@ -524,8 +655,36 @@ func CalcTableWidth(result *executor.QueryResult) int {
 		}
 	}
 
-	// Total width = sum of (column_width + 2 padding) + separators
-	// Format: | col1 | col2 | ... |  =>  1 + sum(width+2+1) = 1 + sum(width+3)
+	return calcWidthFromColWidths(widths)
+}
+
+// CalcTableWidthWithMax returns the display width after smart column truncation.
+func CalcTableWidthWithMax(result *executor.QueryResult, maxWidth int) int {
+	if result == nil || len(result.Columns) == 0 {
+		return 0
+	}
+
+	widths := make([]int, len(result.Columns))
+	for i, col := range result.Columns {
+		widths[i] = utf8.RuneCountInString(col)
+	}
+	for _, row := range result.Rows {
+		for i, val := range row {
+			if i < len(widths) {
+				w := utf8.RuneCountInString(formatValue(val))
+				if w > widths[i] {
+					widths[i] = w
+				}
+			}
+		}
+	}
+
+	f := &Formatter{maxWidth: maxWidth}
+	widths = f.adjustColumnWidths(widths, len(result.Columns))
+	return calcWidthFromColWidths(widths)
+}
+
+func calcWidthFromColWidths(widths []int) int {
 	total := 1 // leading "|"
 	for _, w := range widths {
 		total += w + 3 // " value |" = 1 space + value + 1 space + "|"

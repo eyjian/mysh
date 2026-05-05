@@ -17,6 +17,7 @@ type Config struct {
 	Theme      ThemeConfig              `mapstructure:"theme"`
 	History    HistoryConfig            `mapstructure:"history"`
 	Completion CompletionConfig         `mapstructure:"completion"`
+	Safety     SafetyConfig             `mapstructure:"safety"`
 	Aliases    map[string]string        `mapstructure:"aliases"`
 	Sessions   map[string]SessionConfig `mapstructure:"sessions"`
 
@@ -32,6 +33,13 @@ type ConnectionConfig struct {
 	Password string `mapstructure:"password"`
 	Database string `mapstructure:"database"`
 	Charset  string `mapstructure:"charset"`
+	Timeout  int    `mapstructure:"timeout"` // connection timeout in seconds (0 = default 30s)
+}
+
+// SafetyConfig holds safety-related configuration.
+type SafetyConfig struct {
+	SafeUpdates   bool `mapstructure:"safe_updates"`   // block UPDATE/DELETE without WHERE/LIMIT
+	SlowThreshold int  `mapstructure:"slow_threshold"` // slow query threshold in seconds (0 = disabled)
 }
 
 // UIConfig holds UI-related configuration.
@@ -120,6 +128,10 @@ func DefaultConfig() *Config {
 			MinChars:       2,
 			MaxSuggestions: 15,
 		},
+		Safety: SafetyConfig{
+			SafeUpdates:   false,
+			SlowThreshold: 0,
+		},
 	}
 }
 
@@ -168,6 +180,8 @@ func Load() (*Config, error) {
 	v.SetDefault("history.max_entries", cfg.History.MaxEntries)
 	v.SetDefault("completion.min_chars", cfg.Completion.MinChars)
 	v.SetDefault("completion.max_suggestions", cfg.Completion.MaxSuggestions)
+	v.SetDefault("safety.safe_updates", cfg.Safety.SafeUpdates)
+	v.SetDefault("safety.slow_threshold", cfg.Safety.SlowThreshold)
 
 	// Read config file (optional)
 	if err := v.ReadInConfig(); err != nil {

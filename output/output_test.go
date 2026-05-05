@@ -477,3 +477,145 @@ func TestFormatDefault(t *testing.T) {
 		t.Errorf("Format(99).String() = %q, want %q", f.String(), "table")
 	}
 }
+
+// ---- Smart column width tests ----
+
+func TestAdjustColumnWidths_NoLimit(t *testing.T) {
+	var buf bytes.Buffer
+	f := NewFormatter(FormatTable, &buf)
+	// No max width set — should not truncate
+	widths := []int{10, 20, 30}
+	result := f.adjustColumnWidths(widths, 3)
+	if result[0] != 10 || result[1] != 20 || result[2] != 30 {
+		t.Errorf("Expected widths unchanged, got %v", result)
+	}
+}
+
+func TestAdjustColumnWidths_FitsExactly(t *testing.T) {
+	var buf bytes.Buffer
+	f := NewFormatter(FormatTable, &buf)
+	// Total: 1 + (10+3) + (20+3) = 37
+	f.SetMaxWidth(37)
+	widths := []int{10, 20}
+	result := f.adjustColumnWidths(widths, 2)
+	if result[0] != 10 || result[1] != 20 {
+		t.Errorf("Expected widths unchanged when fits, got %v", result)
+	}
+}
+
+func TestAdjustColumnWidths_NeedsTruncation(t *testing.T) {
+	var buf bytes.Buffer
+	f := NewFormatter(FormatTable, &buf)
+	// Total: 1 + (100+3) + (10+3) = 117, but maxWidth is 30
+	f.SetMaxWidth(30)
+	widths := []int{100, 10}
+	result := f.adjustColumnWidths(widths, 2)
+	// Widest column should be truncated
+	total := 1
+	for _, w := range result {
+		total += w + 3
+	}
+	if total > 30 {
+		t.Errorf("Expected total width <= 30, got %d (widths=%v)", total, result)
+	}
+}
+
+func TestAdjustColumnWidths_MinimumWidth(t *testing.T) {
+	var buf bytes.Buffer
+	f := NewFormatter(FormatTable, &buf)
+	// Very narrow terminal
+	f.SetMaxWidth(15)
+	widths := []int{50, 40, 30}
+	result := f.adjustColumnWidths(widths, 3)
+	// Each column should be at least minWidth (4)
+	for _, w := range result {
+		if w < 4 {
+			t.Errorf("Column width should be >= 4, got %d", w)
+		}
+	}
+}
+
+func TestTruncateRunes(t *testing.T) {
+	tests := []struct {
+		input    string
+		maxRunes int
+		want     string
+	}{
+		{"hello", 10, "hello"},
+		{"hello", 5, "hello"},
+		{"hello", 4, "hel…"},
+		{"hello", 1, "…"},
+		{"你好世界", 3, "你好…"},
+	}
+	for _, tt := range tests {
+		got := truncateRunes(tt.input, tt.maxRunes)
+		if got != tt.want {
+			t.Errorf("truncateRunes(%q, %d) = %q, want %q", tt.input, tt.maxRunes, got, tt.want)
+		}
+	}
+}
+
+func TestSetMaxWidth(t *testing.T) {
+	var buf bytes.Buffer
+	f := NewFormatter(FormatTable, &buf)
+	if f.MaxWidth() != 0 {
+		t.Errorf("Default maxWidth should be 0")
+	}
+	f.SetMaxWidth(80)
+	if f.MaxWidth() != 80 {
+		t.Errorf("MaxWidth should be 80 after SetMaxWidth")
+	}
+}
+
+func TestWriteResult_TableWithMaxWidth(t *testing.T) {
+	var buf bytes.Buffer
+	f := NewFormatter(FormatTable, &buf)
+	f.SetMaxWidth(30)
+
+	result := &executor.QueryResult{
+		Columns:  []string{"id", "very_long_column_name"},
+		Rows:     [][]any{{int64(1), "a very long value that should be truncated"}},
+		RowCount: 1,
+		IsQuery:  true,
+		Duration: time.Millisecond,
+	}
+
+	err := f.WriteResult(result)
+	if err != nil {
+		t.Fatalf("WriteResult error: %v", err)
+	}
+
+	output := buf.String()
+	// Should contain id column
+	if !strings.Contains(output, "id") {
+		t.Errorf("Output should contain 'id': %q", output)
+	}
+	// Lines should not exceed maxWidth significantly
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		stripped := stripANSI(line)
+		if len([]rune(stripped)) > 35 { // allow some margin
+			t.Errorf("Line too long (%d chars): %q", len([]rune(stripped)), stripped)
+		}
+	}
+}
+
+func TestCalcTableWidthWithMax(t *testing.T) {
+	result := &executor.QueryResult{
+		Columns: []string{"id", "name"},
+		Rows:    [][]any{{int64(1), "Alice"}},
+		IsQuery: true,
+	}
+
+	// Without max
+	w1 := CalcTableWidth(result)
+	if w1 <= 0 {
+		t.Errorf("CalcTableWidth should be > 0, got %d", w1)
+	}
+
+	// With max that forces truncation
+	w2 := CalcTableWidthWithMax(result, 20)
+	if w2 > 20 {
+		t.Errorf("CalcTableWidthWithMax should be <= 20, got %d", w2)
+	}
+}

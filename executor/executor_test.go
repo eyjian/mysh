@@ -399,3 +399,157 @@ func TestExecute_SemicolonOnly(t *testing.T) {
 		t.Error("Semicolon-only should not be IsQuery")
 	}
 }
+
+// ---- Safe-updates tests ----
+
+func TestSafeUpdates_DefaultOff(t *testing.T) {
+	e := New(nil, nil)
+	if e.SafeUpdates() {
+		t.Error("SafeUpdates should be off by default")
+	}
+}
+
+func TestSafeUpdates_SetOnOff(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(true)
+	if !e.SafeUpdates() {
+		t.Error("SafeUpdates should be on after SetSafeUpdates(true)")
+	}
+	e.SetSafeUpdates(false)
+	if e.SafeUpdates() {
+		t.Error("SafeUpdates should be off after SetSafeUpdates(false)")
+	}
+}
+
+func TestCheckSafeUpdates_UpdateNoWhere(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(true)
+	err := e.checkSafeUpdates("UPDATE users SET name = 'test'")
+	if err == nil {
+		t.Error("Expected SafeUpdateError for UPDATE without WHERE/LIMIT")
+	}
+	if _, ok := err.(*SafeUpdateError); !ok {
+		t.Errorf("Expected *SafeUpdateError, got %T", err)
+	}
+}
+
+func TestCheckSafeUpdates_UpdateWithWhere(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(true)
+	err := e.checkSafeUpdates("UPDATE users SET name = 'test' WHERE id = 1")
+	if err != nil {
+		t.Errorf("Expected no error for UPDATE with WHERE, got %v", err)
+	}
+}
+
+func TestCheckSafeUpdates_UpdateWithLimit(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(true)
+	err := e.checkSafeUpdates("UPDATE users SET name = 'test' LIMIT 10")
+	if err != nil {
+		t.Errorf("Expected no error for UPDATE with LIMIT, got %v", err)
+	}
+}
+
+func TestCheckSafeUpdates_DeleteNoWhere(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(true)
+	err := e.checkSafeUpdates("DELETE FROM users")
+	if err == nil {
+		t.Error("Expected SafeUpdateError for DELETE without WHERE/LIMIT")
+	}
+}
+
+func TestCheckSafeUpdates_DeleteWithWhere(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(true)
+	err := e.checkSafeUpdates("DELETE FROM users WHERE id = 1")
+	if err != nil {
+		t.Errorf("Expected no error for DELETE with WHERE, got %v", err)
+	}
+}
+
+func TestCheckSafeUpdates_SelectNotBlocked(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(true)
+	err := e.checkSafeUpdates("SELECT * FROM users")
+	if err != nil {
+		t.Errorf("SELECT should not be blocked by safe-updates, got %v", err)
+	}
+}
+
+func TestCheckSafeUpdates_InsertNotBlocked(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(true)
+	err := e.checkSafeUpdates("INSERT INTO users VALUES (1, 'test')")
+	if err != nil {
+		t.Errorf("INSERT should not be blocked by safe-updates, got %v", err)
+	}
+}
+
+func TestCheckSafeUpdates_OffNotBlocked(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(false)
+	// checkSafeUpdates is only called when safeUpdates=true, but the method
+	// itself doesn't check the flag — that's done in Execute().
+	// When safeUpdates=false, Execute() skips the check entirely.
+	// So we just verify the flag is off.
+	if e.SafeUpdates() {
+		t.Error("SafeUpdates should be off")
+	}
+}
+
+func TestCheckSafeUpdates_WithComments(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSafeUpdates(true)
+	err := e.checkSafeUpdates("-- comment\nDELETE FROM users")
+	if err == nil {
+		t.Error("Expected SafeUpdateError for DELETE with leading comment")
+	}
+}
+
+func TestSafeUpdateError_Message(t *testing.T) {
+	err := &SafeUpdateError{Query: "DELETE FROM users"}
+	msg := err.Error()
+	if msg == "" {
+		t.Error("SafeUpdateError.Error() should not be empty")
+	}
+}
+
+// ---- Slow threshold tests ----
+
+func TestSlowThreshold_DefaultDisabled(t *testing.T) {
+	e := New(nil, nil)
+	if e.SlowThreshold() != 0 {
+		t.Error("SlowThreshold should be 0 (disabled) by default")
+	}
+}
+
+func TestSlowThreshold_Set(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSlowThreshold(5 * time.Second)
+	if e.SlowThreshold() != 5*time.Second {
+		t.Errorf("SlowThreshold = %v, want 5s", e.SlowThreshold())
+	}
+}
+
+func TestSlowThreshold_SetZero(t *testing.T) {
+	e := New(nil, nil)
+	e.SetSlowThreshold(5 * time.Second)
+	e.SetSlowThreshold(0)
+	if e.SlowThreshold() != 0 {
+		t.Error("SlowThreshold should be 0 after SetSlowThreshold(0)")
+	}
+}
+
+// ---- QueryResult SlowQuery field test ----
+
+func TestQueryResult_SlowQuery(t *testing.T) {
+	qr := &QueryResult{
+		Duration:  10 * time.Second,
+		SlowQuery: true,
+	}
+	if !qr.SlowQuery {
+		t.Error("SlowQuery should be true")
+	}
+}

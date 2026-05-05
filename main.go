@@ -39,6 +39,9 @@ var (
 	flagFormat             string
 	flagCharset            string
 	flagPageSize           = -1 // -1 means not set, 0 means no pagination
+	flagSafeUpdates        bool
+	flagSlowThreshold      = -1 // -1 means not set, 0 means disabled
+	flagConnTimeout        = -1 // -1 means not set, 0 means default 30s
 )
 
 func main() {
@@ -110,6 +113,23 @@ func main() {
 
 	// Step 5: Initialize executor
 	exec := executor.New(pool, meta)
+
+	// Apply safety settings from config and CLI flags
+	if cfg.Safety.SafeUpdates || flagSafeUpdates {
+		exec.SetSafeUpdates(true)
+	}
+	if flagSlowThreshold >= 0 {
+		exec.SetSlowThreshold(time.Duration(flagSlowThreshold) * time.Second)
+	} else if cfg.Safety.SlowThreshold > 0 {
+		exec.SetSlowThreshold(time.Duration(cfg.Safety.SlowThreshold) * time.Second)
+	}
+
+	// Apply connection timeout from config and CLI flags
+	if flagConnTimeout >= 0 {
+		pool.SetConnTimeout(time.Duration(flagConnTimeout) * time.Second)
+	} else if cfg.Connection.Timeout > 0 {
+		pool.SetConnTimeout(time.Duration(cfg.Connection.Timeout) * time.Second)
+	}
 
 	// Step 6: Initialize output formatter (writing to stdout)
 	outFmt := output.FormatTable
@@ -306,6 +326,18 @@ func parseArgs() error {
 				fmt.Sscanf(args[i+1], "%d", &flagPageSize)
 				i++
 			}
+		case "-U", "--safe-updates":
+			flagSafeUpdates = true
+		case "--slow-threshold":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &flagSlowThreshold)
+				i++
+			}
+		case "--connect-timeout":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &flagConnTimeout)
+				i++
+			}
 		case "--help", "-help":
 			printUsage()
 			os.Exit(0)
@@ -345,6 +377,9 @@ Options:
       --default-character-set <name> Set the default character set
       --auto-vertical-output   Auto switch to vertical if result wider than terminal
       --page-size <n>     Result pagination rows (0 = no pagination, default: 0)
+  -U, --safe-updates      Block UPDATE/DELETE without WHERE or LIMIT
+      --slow-threshold <s>  Slow query warning threshold in seconds (0 = disabled)
+      --connect-timeout <s>  Connection/query timeout in seconds (default: 30)
       --help              Show this help message
       --version           Show version
 
@@ -358,7 +393,8 @@ Examples:
   mysh -u root -p secret -e "SELECT * FROM users LIMIT 10"
   mysh -e "SELECT * FROM users" --format markdown
   mysh -e "SHOW TABLES" --format json
-  mysh --default-character-set utf8mb4`)
+  mysh --default-character-set utf8mb4
+  mysh -U --slow-threshold 5`)
 }
 
 // cleanup performs graceful shutdown of all resources.

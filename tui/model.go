@@ -110,6 +110,12 @@ type Model struct {
 	// Timing display
 	showTiming bool // true = display query execution time
 
+	// Safe updates mode
+	safeUpdates bool // true = block UPDATE/DELETE without WHERE/LIMIT
+
+	// Working directory (for \cd and \sys)
+	workDir string
+
 	// Styles
 	promptStyle lipgloss.Style
 	outputStyle lipgloss.Style
@@ -134,6 +140,8 @@ func NewModel(deps Dependencies) Model {
 		mouseEnabled:        false,
 		autoVerticalOutput:  deps.AutoVerticalOutput,
 		connected:           true,
+		safeUpdates:         deps.Config.Safety.SafeUpdates,
+		workDir:             "", // will be set on first prompt
 		promptStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
 		outputStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
 		errorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
@@ -786,7 +794,20 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "\\help", "\\h", "\\?":
+		echoIdx := len(m.output) - 1 // index of the echo line just added
 		m.addOutput(helpText())
+		// Auto-scroll so the echo line ("mysh> \help") is visible at the top
+		maxLines := m.height - 3
+		if maxLines < 1 {
+			maxLines = 10
+		}
+		totalAfterHelp := len(m.output)
+		if totalAfterHelp > maxLines {
+			m.scrollOffset = totalAfterHelp - maxLines - echoIdx
+			if m.scrollOffset < 0 {
+				m.scrollOffset = 0
+			}
+		}
 
 	case "\\clear", "\\c":
 		m.output = nil
@@ -823,6 +844,23 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "\\format":
 		if len(parts) < 2 {
 			m.addOutput(fmt.Sprintf("Current format: %s", m.deps.Formatter.CurrentFormat()))
+		} else if strings.ToLower(parts[1]) == "sql" {
+			// SQL formatting: format the last query or current input
+			sql := strings.TrimSpace(m.ed.Text())
+			if sql == "" && m.lastQuery != "" {
+				sql = m.lastQuery + ";"
+			}
+			if sql == "" {
+				m.addOutput("No SQL to format. Type a SQL statement first.")
+			} else {
+				formatted := highlight.FormatSQL(sql)
+				// Apply syntax highlighting to the formatted SQL
+				if m.deps.Highlighter != nil {
+					m.addOutput(m.deps.Highlighter.Highlight(formatted))
+				} else {
+					m.addOutput(formatted)
+				}
+			}
 		} else {
 			f, err := output.ParseFormat(parts[1])
 			if err != nil {
@@ -870,6 +908,17 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 				m.addOutput("Reconnected successfully.")
 				m.connected = true
 			}
+		}
+
+	case "\\desc", "\\d":
+		if len(parts) < 2 {
+			m.addOutput("Usage: \\desc <table> [columns|indexes|create|full]")
+			m.addOutput("  columns  Column list (default)")
+			m.addOutput("  full     Full column info (type, nullable, key, default, extra)")
+			m.addOutput("  indexes  Index information")
+			m.addOutput("  create   SHOW CREATE TABLE")
+		} else {
+			m.handleDesc(parts[1:])
 		}
 
 	case "\\source":
@@ -975,6 +1024,94 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.addOutput("Timing is on.")
 		} else {
 			m.addOutput("Timing is off.")
+		}
+
+	case "\\safe-updates":
+		if len(parts) >= 2 {
+			switch strings.ToLower(parts[1]) {
+			case "on", "1", "true":
+				m.safeUpdates = true
+				m.deps.Executor.SetSafeUpdates(true)
+				m.addOutput("Safe updates mode enabled (UPDATE/DELETE require WHERE or LIMIT).")
+			case "off", "0", "false":
+				m.safeUpdates = false
+				m.deps.Executor.SetSafeUpdates(false)
+				m.addOutput("Safe updates mode disabled.")
+			default:
+				m.addOutput("Usage: \\safe-updates [on|off]")
+			}
+		} else {
+			m.safeUpdates = !m.safeUpdates
+			m.deps.Executor.SetSafeUpdates(m.safeUpdates)
+			if m.safeUpdates {
+				m.addOutput("Safe updates mode enabled (UPDATE/DELETE require WHERE or LIMIT).")
+			} else {
+				m.addOutput("Safe updates mode disabled.")
+			}
+		}
+
+	case "\\slow":
+		if len(parts) >= 2 {
+			var seconds int
+			if _, err := fmt.Sscanf(parts[1], "%d", &seconds); err == nil {
+				if seconds <= 0 {
+					m.deps.Executor.SetSlowThreshold(0)
+					m.addOutput("Slow query warning disabled.")
+				} else {
+					m.deps.Executor.SetSlowThreshold(time.Duration(seconds) * time.Second)
+					m.addOutput(fmt.Sprintf("Slow query threshold set to %d second(s).", seconds))
+				}
+			} else {
+				m.addOutput("Usage: \\slow <seconds>  (0 = disabled)")
+			}
+		} else {
+			threshold := m.deps.Executor.SlowThreshold()
+			if threshold <= 0 {
+				m.addOutput("Slow query warning is disabled. Use \\slow <seconds> to enable.")
+			} else {
+				m.addOutput(fmt.Sprintf("Slow query threshold: %s", executor.FormatDuration(threshold)))
+			}
+		}
+
+	case "\\copy":
+		if len(parts) < 2 {
+			m.addOutput("Usage: \\copy <result|query|sql>")
+			m.addOutput("  result  Copy last query result as TSV (tab-separated)")
+			m.addOutput("  query   Copy last executed SQL statement")
+			m.addOutput("  sql     Copy current input buffer")
+		} else {
+			m.handleCopy(parts[1])
+		}
+
+	case "\\cd":
+		if len(parts) < 2 {
+			// Show current directory
+			dir, _ := os.Getwd()
+			m.addOutput(dir)
+		} else {
+			target := parts[1]
+			if strings.HasPrefix(target, "~") {
+				home, err := os.UserHomeDir()
+				if err == nil {
+					target = home + target[1:]
+				}
+			}
+			if err := os.Chdir(target); err != nil {
+				m.addOutput(fmt.Sprintf("ERROR: %s", err))
+			} else {
+				dir, _ := os.Getwd()
+				m.workDir = dir
+				m.addOutput(dir)
+			}
+		}
+
+	case "\\sys", "\\!":
+		if len(parts) < 2 {
+			m.addOutput("Usage: \\sys <command> [args...]")
+			m.addOutput("  Execute a system command from within mysh.")
+			m.addOutput("  Example: \\sys ls -la")
+		} else {
+			m.handleSys(parts[1:])
 		}
 
 	default:
@@ -1120,14 +1257,21 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 	m.ed.Clear()
 
 	// Update connection health based on result
-	if err != nil && executor.IsConnectionError(err) {
+	if err != nil && connection.IsConnectionError(err) {
 		m.connected = false
 	} else if err == nil {
 		m.connected = true
 	}
 
 	if err != nil {
-		m.addOutput(fmt.Sprintf("%s", err))
+		errMsg := err.Error()
+		// Check if it's a safe-update error and style it specially
+		if _, ok := err.(*executor.SafeUpdateError); ok {
+			m.addOutput(fmt.Sprintf("\033[33m⚠ %s\033[0m", errMsg))
+			m.addOutput(fmt.Sprintf("\033[2mHint: Use \\safe-updates to toggle, or add WHERE/LIMIT clause.\033[0m"))
+		} else {
+			m.addOutput(fmt.Sprintf("%s", errMsg))
+		}
 		return
 	}
 
@@ -1137,12 +1281,21 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 		m.connected = true
 	}
 
+	// Show slow query warning
+	if result != nil && result.SlowQuery {
+		m.addOutput(fmt.Sprintf("\033[33m⚠ Slow query: %s exceeds threshold\033[0m",
+			executor.FormatDuration(result.Duration)))
+	}
+
 	// Choose format: use override if specified, else auto-vertical or global default
 	outFmt := m.deps.Formatter.CurrentFormat()
 	if formatOverride != output.FormatTable {
 		outFmt = formatOverride
 	} else if m.autoVerticalOutput && outFmt == output.FormatTable && m.width > 0 {
-		if output.CalcTableWidth(result) > m.width {
+		// With smart column truncation, use table format if it fits after truncation
+		if m.deps.Formatter.MaxWidth() > 0 {
+			// Smart truncation is enabled, use table format
+		} else if output.CalcTableWidth(result) > m.width {
 			outFmt = output.FormatVertical
 		}
 	}
@@ -1159,6 +1312,9 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 	var buf strings.Builder
 	formatter := output.NewFormatter(outFmt, &buf)
 	formatter.SetShowTiming(m.showTiming)
+	if m.width > 0 && outFmt == output.FormatTable {
+		formatter.SetMaxWidth(m.width)
+	}
 	if writeErr := formatter.WriteResult(result); writeErr != nil {
 		m.addOutput(fmt.Sprintf("Output error: %s", writeErr))
 	}
@@ -1213,6 +1369,9 @@ func (m *Model) renderPagedResult() string {
 
 	var buf strings.Builder
 	formatter := output.NewFormatter(m.pagedFormat, &buf)
+	if m.width > 0 && m.pagedFormat == output.FormatTable {
+		formatter.SetMaxWidth(m.width)
+	}
 	formatter.WriteResult(partial)
 
 	// Append pager prompt with ANSI styling
@@ -1263,6 +1422,9 @@ func (m *Model) exitPagination(showAll bool) {
 		m.removeLastPagedOutput()
 		var buf strings.Builder
 		formatter := output.NewFormatter(m.pagedFormat, &buf)
+		if m.width > 0 && m.pagedFormat == output.FormatTable {
+			formatter.SetMaxWidth(m.width)
+		}
 		formatter.WriteResult(m.pagedResult)
 		m.addOutput(strings.TrimRight(buf.String(), "\n"))
 	}
@@ -2031,11 +2193,259 @@ func (m Model) formatStatus() string {
 		sb.WriteString("not connected")
 	}
 	sb.WriteString(fmt.Sprintf("\nOutput format: %s\n", m.deps.Formatter.CurrentFormat()))
+	if m.safeUpdates {
+		sb.WriteString("Safe updates: ON\n")
+	}
+	if m.deps.Executor != nil {
+		if threshold := m.deps.Executor.SlowThreshold(); threshold > 0 {
+			sb.WriteString(fmt.Sprintf("Slow query threshold: %s\n", executor.FormatDuration(threshold)))
+		}
+	}
 	if m.deps.Meta != nil {
 		dbs := m.deps.Meta.Databases()
 		sb.WriteString(fmt.Sprintf("Cached databases: %d\n", len(dbs)))
 	}
 	return sb.String()
+}
+
+// handleDesc handles the \desc command with sub-modes.
+func (m *Model) handleDesc(parts []string) {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+
+	tableName := parts[0]
+	mode := "columns"
+	if len(parts) >= 2 {
+		mode = strings.ToLower(parts[1])
+	}
+
+	db := m.deps.Pool.CurrentDB()
+
+	switch mode {
+	case "create":
+		createSQL, err := m.deps.Pool.ShowCreateTable(db, tableName)
+		if err != nil {
+			m.addOutput(fmt.Sprintf("ERROR: %s", err))
+			return
+		}
+		// Format and highlight the CREATE TABLE statement
+		formatted := highlight.FormatSQL(createSQL)
+		if m.deps.Highlighter != nil {
+			m.addOutput(m.deps.Highlighter.Highlight(formatted))
+		} else {
+			m.addOutput(formatted)
+		}
+
+	case "indexes", "index", "keys":
+		indexes, err := m.deps.Pool.ShowIndexes(db, tableName)
+		if err != nil {
+			m.addOutput(fmt.Sprintf("ERROR: %s", err))
+			return
+		}
+		if len(indexes) == 0 {
+			m.addOutput(fmt.Sprintf("No indexes found for table '%s'.", tableName))
+			return
+		}
+		// Group by index name
+		type idxGroup struct {
+			name      string
+			columns   []string
+			nonUnique bool
+			idxType   string
+		}
+		groups := make(map[string]*idxGroup)
+		var order []string
+		for _, idx := range indexes {
+			if _, ok := groups[idx.Name]; !ok {
+				groups[idx.Name] = &idxGroup{
+					name:      idx.Name,
+					nonUnique: idx.NonUnique,
+					idxType:   idx.Type,
+				}
+				order = append(order, idx.Name)
+			}
+			groups[idx.Name].columns = append(groups[idx.Name].columns, idx.Columns)
+		}
+
+		// Display as table
+		result := &executor.QueryResult{
+			Columns: []string{"Index", "Type", "Unique", "Columns"},
+			IsQuery: true,
+		}
+		for _, name := range order {
+			g := groups[name]
+			unique := "YES"
+			if g.nonUnique {
+				unique = "NO"
+			}
+			result.Rows = append(result.Rows, []any{name, g.idxType, unique, strings.Join(g.columns, ", ")})
+		}
+		m.displayQueryResult(result, nil, output.FormatTable)
+
+	case "full":
+		// Full column info using SHOW FULL COLUMNS
+		result, err := m.deps.Executor.Execute(context.Background(),
+			fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`", tableName)+";")
+		if err != nil {
+			m.addOutput(fmt.Sprintf("ERROR: %s", err))
+			return
+		}
+		m.displayQueryResult(result, nil, output.FormatTable)
+
+	default: // "columns"
+		result, err := m.deps.Executor.Execute(context.Background(),
+			fmt.Sprintf("DESCRIBE `%s`", tableName)+";")
+		if err != nil {
+			m.addOutput(fmt.Sprintf("ERROR: %s", err))
+			return
+		}
+		m.displayQueryResult(result, nil, output.FormatTable)
+	}
+}
+
+// handleCopy copies data to the system clipboard.
+func (m *Model) handleCopy(what string) {
+	var content string
+
+	switch strings.ToLower(what) {
+	case "result":
+		if m.lastResult == nil || !m.lastResult.IsQuery {
+			m.addOutput("No query result to copy. Execute a SELECT query first.")
+			return
+		}
+		// Format as TSV (tab-separated values)
+		var buf strings.Builder
+		buf.WriteString(strings.Join(m.lastResult.Columns, "\t"))
+		buf.WriteString("\n")
+		for _, row := range m.lastResult.Rows {
+			vals := make([]string, len(row))
+			for i, val := range row {
+				vals[i] = output.FormatValuePlain(val)
+			}
+			buf.WriteString(strings.Join(vals, "\t"))
+			buf.WriteString("\n")
+		}
+		content = buf.String()
+
+	case "query":
+		if m.lastQuery == "" {
+			m.addOutput("No last query to copy.")
+			return
+		}
+		content = m.lastQuery + ";"
+
+	case "sql":
+		sql := strings.TrimSpace(m.ed.Text())
+		if sql == "" {
+			m.addOutput("Input buffer is empty.")
+			return
+		}
+		content = sql
+
+	default:
+		m.addOutput(fmt.Sprintf("Unknown copy target: %s (use: result, query, sql)", what))
+		return
+	}
+
+	if err := copyToClipboard(content); err != nil {
+		m.addOutput(fmt.Sprintf("Copy failed: %s", err))
+		m.addOutput("Tip: install xclip (Linux) or xsel for clipboard support.")
+		return
+	}
+
+	lines := strings.Count(content, "\n")
+	if lines > 0 {
+		lines-- // trailing newline
+	}
+	switch strings.ToLower(what) {
+	case "result":
+		m.addOutput(fmt.Sprintf("Copied %d rows to clipboard.", lines))
+	case "query":
+		m.addOutput("Copied last query to clipboard.")
+	case "sql":
+		m.addOutput("Copied current SQL to clipboard.")
+	}
+}
+
+// handleSys executes a system command and displays its output.
+func (m *Model) handleSys(cmdParts []string) {
+	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+	if m.workDir != "" {
+		cmd.Dir = m.workDir
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		errMsg := strings.TrimRight(stderr.String(), "\n")
+		if errMsg != "" {
+			m.addOutput(fmt.Sprintf("ERROR: %s\n%s", err, errMsg))
+		} else {
+			m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		}
+		return
+	}
+
+	out := strings.TrimRight(stdout.String(), "\n")
+	if out != "" {
+		// Split multi-line output and add each line
+		for _, line := range strings.Split(out, "\n") {
+			m.addOutput(line)
+		}
+	}
+}
+
+// copyToClipboard copies text to the system clipboard using available tools.
+func copyToClipboard(text string) error {
+	// Try xclip first (most common on Linux)
+	if path, err := exec.LookPath("xclip"); err == nil {
+		cmd := exec.Command(path, "-selection", "clipboard")
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+	}
+
+	// Try xsel
+	if path, err := exec.LookPath("xsel"); err == nil {
+		cmd := exec.Command(path, "--clipboard", "--input")
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+	}
+
+	// Try pbcopy (macOS)
+	if path, err := exec.LookPath("pbcopy"); err == nil {
+		cmd := exec.Command(path)
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+	}
+
+	// Try termux-clipboard-set (Termux on Android)
+	if path, err := exec.LookPath("termux-clipboard-set"); err == nil {
+		cmd := exec.Command(path)
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+	}
+
+	// Try wl-copy (Wayland)
+	if path, err := exec.LookPath("wl-copy"); err == nil {
+		cmd := exec.Command(path)
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no clipboard tool found (install xclip, xsel, pbcopy, or wl-copy)")
 }
 
 // helpText returns the help message for backslash commands.
@@ -2049,14 +2459,18 @@ Backslash commands:
   \status, \s       Show connection status
   \use <db>         Switch to database <db>
   \refresh, \r      Refresh metadata cache
-  \format [type]    Set/show output format (table|vertical|json|markdown)
+  \format [type]    Set/show output format (table|vertical|json|markdown|sql)
   \history [pat]    Search/show command history
   \connect <dsn>    Connect to a database (user@host:port/db or just db)
   \reconnect        Reconnect to the current server
+  \desc <t> [mode]  Describe table (columns|full|indexes|create)
   \source <file>    Execute SQL from file
   \edit, \e         Open editor ($EDITOR or vi) to edit/execute SQL
   \pipe, \| <cmd>   Pipe last query result to a system command
+  \copy <what>      Copy to clipboard (result|query|sql)
   \timing           Toggle query execution time display
+  \safe-updates [on|off]  Toggle safe-updates mode (block UPDATE/DELETE without WHERE/LIMIT)
+  \slow [seconds]   Set/show slow query warning threshold (0 = disabled)
   \mouse            Toggle mouse mode (scroll wheel vs text selection)
   \export <f> [fmt] Export last result to file (csv/json/markdown)
   \watch [sec] [SQL] Watch query at intervals (default 5s, Ctrl+C stop)
@@ -2066,6 +2480,8 @@ Backslash commands:
   \session <name>   Switch to saved session
   \session save <n> Save current connection as session
   \session del <n>  Delete a saved session
+  \cd [dir]         Change/show working directory (for \source, \sys)
+  \sys, \! <cmd>    Execute a system command
 
 Format suffixes (append to SQL):
   \G                Display result in vertical format

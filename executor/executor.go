@@ -21,28 +21,72 @@ type QueryResult struct {
 	IsQuery      bool          // true for SELECT/SHOW/DESCRIBE, false for DML/DDL
 	Error        error         // Error if any
 	Warning      string        // Non-critical message (e.g., "Reconnected to server")
+	SlowQuery    bool          // true if query exceeded slow query threshold
+}
+
+// SafeUpdateError is returned when a DML statement is blocked by safe-updates mode.
+type SafeUpdateError struct {
+	Query string
+}
+
+func (e *SafeUpdateError) Error() string {
+	return fmt.Sprintf("Safe update mode: statement blocked (no WHERE/LIMIT clause): %s", e.Query)
 }
 
 // Executor handles SQL statement execution.
 type Executor struct {
-	pool    *connection.Pool
-	meta    *metadata.Cache
-	cancel  context.CancelFunc
+	pool           *connection.Pool
+	meta           *metadata.Cache
+	cancel         context.CancelFunc
+	safeUpdates    bool          // when true, block UPDATE/DELETE without WHERE/LIMIT
+	slowThreshold  time.Duration // queries slower than this are flagged (0 = disabled)
 }
 
 // New creates a new SQL executor.
 func New(pool *connection.Pool, meta *metadata.Cache) *Executor {
 	return &Executor{
-		pool: pool,
-		meta: meta,
+		pool:          pool,
+		meta:          meta,
+		slowThreshold: 0, // disabled by default
 	}
+}
+
+// SetSafeUpdates enables or disables safe-updates mode.
+func (e *Executor) SetSafeUpdates(enabled bool) {
+	e.safeUpdates = enabled
+}
+
+// SafeUpdates returns whether safe-updates mode is enabled.
+func (e *Executor) SafeUpdates() bool {
+	return e.safeUpdates
+}
+
+// SetSlowThreshold sets the slow query warning threshold.
+// A duration of 0 disables slow query warnings.
+func (e *Executor) SetSlowThreshold(d time.Duration) {
+	e.slowThreshold = d
+}
+
+// SlowThreshold returns the current slow query threshold.
+func (e *Executor) SlowThreshold() time.Duration {
+	return e.slowThreshold
 }
 
 // Execute runs a single SQL statement and returns the result.
 // If a connection error occurs, it attempts to reconnect and retry once.
 func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, error) {
+	// Check safe-updates before execution
+	if e.safeUpdates {
+		if err := e.checkSafeUpdates(query); err != nil {
+			return nil, err
+		}
+	}
+
 	result, err := e.executeOnce(ctx, query)
-	if err == nil || !IsConnectionError(err) {
+	if err == nil || !connection.IsConnectionError(err) {
+		if err == nil && e.slowThreshold > 0 && result.Duration > e.slowThreshold {
+			result.SlowQuery = true
+		}
 		return result, err
 	}
 
@@ -55,17 +99,85 @@ func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, err
 		result, err = e.executeOnce(ctx, query)
 		if err == nil {
 			result.Warning = "Reconnected to server"
+			if e.slowThreshold > 0 && result.Duration > e.slowThreshold {
+				result.SlowQuery = true
+			}
 		}
 	}
 	return result, err
+}
+
+// checkSafeUpdates validates that UPDATE/DELETE statements have WHERE or LIMIT clauses.
+func (e *Executor) checkSafeUpdates(query string) error {
+	upper := strings.ToUpper(strings.TrimSpace(query))
+
+	// Remove leading comments
+	upper = stripComments(upper)
+
+	// Only check UPDATE and DELETE statements
+	if !strings.HasPrefix(upper, "UPDATE") && !strings.HasPrefix(upper, "DELETE") {
+		return nil
+	}
+
+	// Check for WHERE or LIMIT clause
+	hasWhere := strings.Contains(upper, " WHERE ")
+	hasLimit := strings.Contains(upper, " LIMIT ")
+
+	// Also check for case variations at boundaries
+	if !hasWhere {
+		hasWhere = strings.Contains(upper, "\nWHERE ") || strings.Contains(upper, "\tWHERE ")
+	}
+	if !hasLimit {
+		hasLimit = strings.Contains(upper, "\nLIMIT ") || strings.Contains(upper, "\tLIMIT ")
+	}
+
+	if !hasWhere && !hasLimit {
+		return &SafeUpdateError{Query: truncate(query, 80)}
+	}
+
+	return nil
+}
+
+// stripComments removes SQL comments from the beginning of a query.
+func stripComments(query string) string {
+	for {
+		query = strings.TrimSpace(query)
+		if strings.HasPrefix(query, "--") {
+			if idx := strings.Index(query, "\n"); idx >= 0 {
+				query = query[idx+1:]
+				continue
+			}
+			return ""
+		}
+		if strings.HasPrefix(query, "/*") {
+			if idx := strings.Index(query, "*/"); idx >= 0 {
+				query = query[idx+2:]
+				continue
+			}
+			return ""
+		}
+		return query
+	}
+}
+
+// truncate shortens a string to maxLen, appending "..." if truncated.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // executeOnce runs a single SQL statement without retry logic.
 func (e *Executor) executeOnce(ctx context.Context, query string) (*QueryResult, error) {
 	start := time.Now()
 
-	// Create a cancellable context
-	_, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Create a cancellable context with connection timeout
+	timeout := 30 * time.Second
+	if e.pool != nil && e.pool.ConnTimeout() > 0 {
+		timeout = e.pool.ConnTimeout()
+	}
+	_, cancel := context.WithTimeout(ctx, timeout)
 	e.cancel = cancel
 	defer cancel()
 
@@ -183,23 +295,7 @@ func (e *Executor) IsDDL(query string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(query))
 
 	// Remove leading comments
-	for {
-		if strings.HasPrefix(upper, "--") {
-			if idx := strings.Index(upper, "\n"); idx >= 0 {
-				upper = strings.TrimSpace(upper[idx+1:])
-				continue
-			}
-			return false
-		}
-		if strings.HasPrefix(upper, "/*") {
-			if idx := strings.Index(upper, "*/"); idx >= 0 {
-				upper = strings.TrimSpace(upper[idx+2:])
-				continue
-			}
-			return false
-		}
-		break
-	}
+	upper = stripComments(upper)
 
 	ddlPrefixes := []string{"CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE"}
 	for _, prefix := range ddlPrefixes {
@@ -222,23 +318,7 @@ func (e *Executor) isQueryStatement(query string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(query))
 
 	// Remove leading comments
-	for {
-		if strings.HasPrefix(upper, "--") {
-			if idx := strings.Index(upper, "\n"); idx >= 0 {
-				upper = strings.TrimSpace(upper[idx+1:])
-				continue
-			}
-			return false
-		}
-		if strings.HasPrefix(upper, "/*") {
-			if idx := strings.Index(upper, "*/"); idx >= 0 {
-				upper = strings.TrimSpace(upper[idx+2:])
-				continue
-			}
-			return false
-		}
-		break
-	}
+	upper = stripComments(upper)
 
 	queryPrefixes := []string{"SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH"}
 	for _, prefix := range queryPrefixes {
@@ -351,18 +431,7 @@ func NullString(ns sql.NullString) string {
 }
 
 // IsConnectionError checks if an error is caused by a lost connection.
+// Deprecated: Use connection.IsConnectionError instead.
 func IsConnectionError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "invalid connection") ||
-		strings.Contains(msg, "bad connection") ||
-		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "broken pipe") ||
-		strings.Contains(msg, "EOF") ||
-		strings.Contains(msg, "server has gone away") ||
-		strings.Contains(msg, "connect: connection refused") ||
-		strings.Contains(msg, "i/o timeout") ||
-		strings.Contains(msg, "driver: bad conn")
+	return connection.IsConnectionError(err)
 }
