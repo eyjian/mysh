@@ -2,6 +2,8 @@ module github.com/eyjian/mysh
 
 go 1.25.6
 
+retract v0.1.0 // module path was incorrectly set to "mysh"
+
 require (
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/spf13/viper v1.21.0
