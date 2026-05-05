@@ -27,12 +27,14 @@ var version = "dev"
 
 // CLI flag defaults
 var (
-	flagHost     string
-	flagPort     int
-	flagUser     string
-	flagPassword string
-	flagDatabase string
-	flagExecute  string
+	flagHost               string
+	flagPort               int
+	flagUser               string
+	flagPassword           string
+	flagDatabase           string
+	flagExecute            string
+	flagAutoVerticalOutput bool
+	flagFormat             string
 )
 
 func main() {
@@ -100,7 +102,13 @@ func main() {
 	exec := executor.New(pool, meta)
 
 	// Step 6: Initialize output formatter (writing to stdout)
-	formatter := output.NewFormatter(output.FormatTable, os.Stdout)
+	outFmt := output.FormatTable
+	if flagFormat != "" {
+		if f, err := output.ParseFormat(flagFormat); err == nil {
+			outFmt = f
+		}
+	}
+	formatter := output.NewFormatter(outFmt, os.Stdout)
 
 	// Step 7: Initialize highlighter
 	highlighter := highlight.NewHighlighter(&cfg.Theme)
@@ -131,14 +139,15 @@ func main() {
 
 	// Step 10: Assemble dependencies and start TUI
 	deps := tui.Dependencies{
-		Config:      cfg,
-		Pool:        pool,
-		Executor:    exec,
-		Meta:        meta,
-		History:     hist,
-		Formatter:   formatter,
-		Highlighter: highlighter,
-		Completer:   comp,
+		Config:             cfg,
+		Pool:               pool,
+		Executor:           exec,
+		Meta:               meta,
+		History:            hist,
+		Formatter:          formatter,
+		Highlighter:        highlighter,
+		Completer:          comp,
+		AutoVerticalOutput: flagAutoVerticalOutput,
 	}
 
 	model := tui.NewModel(deps)
@@ -171,7 +180,14 @@ func main() {
 // Returns 0 on success, 1 on error.
 func execBatch(pool *connection.Pool, statements string) int {
 	exec := executor.New(pool, nil)
-	formatter := output.NewFormatter(output.FormatTable, os.Stdout)
+	// Use format from --format flag, default to table
+	outFmt := output.FormatTable
+	if flagFormat != "" {
+		if f, err := output.ParseFormat(flagFormat); err == nil {
+			outFmt = f
+		}
+	}
+	formatter := output.NewFormatter(outFmt, os.Stdout)
 	ctx := context.Background()
 
 	// Split by semicolons, filter empty
@@ -250,6 +266,13 @@ func parseArgs() error {
 				flagExecute = args[i+1]
 				i++
 			}
+		case "--auto-vertical-output":
+			flagAutoVerticalOutput = true
+		case "--format":
+			if i+1 < len(args) {
+				flagFormat = args[i+1]
+				i++
+			}
 		case "--help", "-help":
 			printUsage()
 			os.Exit(0)
@@ -285,6 +308,8 @@ Options:
   -p, --password <pass>   MySQL password
   -D, --database <db>     Default database
   -e, --execute <stmt>    Execute SQL statement and exit
+      --format <type>     Output format: table|vertical|json|markdown
+      --auto-vertical-output   Auto switch to vertical if result wider than terminal
       --help              Show this help message
       --version           Show version
 
@@ -295,7 +320,9 @@ Examples:
   mysh -h localhost -u root -p secret -D mydb
   mysh --host db.example.com --port 3307 --user admin
   mysh -e "SHOW DATABASES"
-  mysh -u root -p secret -e "SELECT * FROM users LIMIT 10"`)
+  mysh -u root -p secret -e "SELECT * FROM users LIMIT 10"
+  mysh -e "SELECT * FROM users" --format markdown
+  mysh -e "SHOW TABLES" --format json`)
 }
 
 // cleanup performs graceful shutdown of all resources.
@@ -314,5 +341,5 @@ func cleanup(deps tui.Dependencies) {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, "Goodbye!")
+	fmt.Fprintln(os.Stderr, "")
 }

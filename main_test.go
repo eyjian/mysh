@@ -200,4 +200,6 @@ func resetFlags() {
 	flagPassword = ""
 	flagDatabase = ""
 	flagExecute = ""
+	flagAutoVerticalOutput = false
+	flagFormat = ""
 }

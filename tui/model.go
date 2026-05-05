@@ -23,14 +23,15 @@ import (
 
 // Dependencies holds all the shared service instances for the TUI.
 type Dependencies struct {
-	Config     *config.Config
-	Pool       *connection.Pool
-	Executor   *executor.Executor
-	Meta       *metadata.Cache
-	History    *history.History
-	Formatter  *output.Formatter
-	Highlighter *highlight.Highlighter
-	Completer  *completer.Completer
+	Config              *config.Config
+	Pool                *connection.Pool
+	Executor            *executor.Executor
+	Meta                *metadata.Cache
+	History             *history.History
+	Formatter           *output.Formatter
+	Highlighter         *highlight.Highlighter
+	Completer           *completer.Completer
+	AutoVerticalOutput  bool
 }
 
 // Model is the top-level bubbletea model for the mysh TUI.
@@ -67,6 +68,9 @@ type Model struct {
 	// Mouse mode
 	mouseEnabled bool // true = scroll wheel captures; false = native selection/copy
 
+	// Auto vertical output
+	autoVerticalOutput bool // true = switch to vertical if result wider than terminal
+
 	// Styles
 	promptStyle lipgloss.Style
 	outputStyle lipgloss.Style
@@ -88,7 +92,8 @@ func NewModel(deps Dependencies) Model {
 		mlPrompt:     mlPrompt,
 		output:       []string{},
 		cursorOn:     true,
-		mouseEnabled: false,
+		mouseEnabled:        false,
+		autoVerticalOutput:  deps.AutoVerticalOutput,
 		promptStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
 		outputStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
 		errorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
@@ -407,6 +412,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	cmd := strings.TrimRight(trimmed, ";")
 	lowerCmd := strings.ToLower(cmd)
 	if lowerCmd == "quit" || lowerCmd == "exit" {
+		m.addOutput(m.prompt + trimmed)
 		m.ed.Clear()
 		m.quitting = true
 		return m, tea.Quit
@@ -635,6 +641,10 @@ func (m Model) execSourceFile(filePath string) (tea.Model, tea.Cmd) {
 		outFmt := m.deps.Formatter.CurrentFormat()
 		if useVertical {
 			outFmt = output.FormatVertical
+		} else if m.autoVerticalOutput && outFmt == output.FormatTable && m.width > 0 {
+			if output.CalcTableWidth(result) > m.width {
+				outFmt = output.FormatVertical
+			}
 		}
 		var buf strings.Builder
 		tmpFormatter := output.NewFormatter(outFmt, &buf)
@@ -689,10 +699,14 @@ func (m Model) executeInput(input string, useVertical bool) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 
-	// Choose format: use vertical if \G was specified
+	// Choose format: use vertical if \G was specified or auto-vertical-output is enabled
 	outFmt := m.deps.Formatter.CurrentFormat()
 	if useVertical {
 		outFmt = output.FormatVertical
+	} else if m.autoVerticalOutput && outFmt == output.FormatTable && m.width > 0 {
+		if output.CalcTableWidth(result) > m.width {
+			outFmt = output.FormatVertical
+		}
 	}
 
 	// Format and display result
@@ -988,7 +1002,7 @@ Backslash commands:
   \status, \s       Show connection status
   \use <db>         Switch to database <db>
   \refresh, \r      Refresh metadata cache
-  \format [type]    Set/show output format (table|vertical|json)
+  \format [type]    Set/show output format (table|vertical|json|markdown)
   \history [pat]    Search/show command history
   \connect <dsn>    Connect to a database
   \source <file>    Execute SQL from file

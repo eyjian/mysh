@@ -17,6 +17,7 @@ const (
 	FormatTable Format = iota
 	FormatVertical
 	FormatJSON
+	FormatMarkdown
 )
 
 // ParseFormat parses a format string and returns the Format enum.
@@ -28,6 +29,8 @@ func ParseFormat(s string) (Format, error) {
 		return FormatVertical, nil
 	case "json", "j":
 		return FormatJSON, nil
+	case "markdown", "md":
+		return FormatMarkdown, nil
 	default:
 		return FormatTable, fmt.Errorf("unknown output format: %s", s)
 	}
@@ -42,6 +45,8 @@ func (f Format) String() string {
 		return "vertical"
 	case FormatJSON:
 		return "json"
+	case FormatMarkdown:
+		return "markdown"
 	default:
 		return "table"
 	}
@@ -103,6 +108,8 @@ func (f *Formatter) WriteResult(result *executor.QueryResult) error {
 		return f.writeVertical(result)
 	case FormatJSON:
 		return f.writeJSON(result)
+	case FormatMarkdown:
+		return f.writeMarkdown(result)
 	default:
 		return f.writeTable(result)
 	}
@@ -258,6 +265,82 @@ func (f *Formatter) writeJSON(result *executor.QueryResult) error {
 	return nil
 }
 
+// writeMarkdown formats results as a Markdown table.
+func (f *Formatter) writeMarkdown(result *executor.QueryResult) error {
+	if len(result.Columns) == 0 {
+		return nil
+	}
+
+	// Convert rows to strings for width calculation
+	strRows := make([][]string, len(result.Rows))
+	for i, row := range result.Rows {
+		strRows[i] = make([]string, len(row))
+		for j, val := range row {
+			strRows[i][j] = formatValue(val)
+		}
+	}
+
+	// Calculate column widths
+	widths := make([]int, len(result.Columns))
+	for i, col := range result.Columns {
+		widths[i] = utf8.RuneCountInString(col)
+	}
+	for _, row := range strRows {
+		for i, val := range row {
+			if i < len(widths) {
+				w := utf8.RuneCountInString(val)
+				if w > widths[i] {
+					widths[i] = w
+				}
+			}
+		}
+	}
+
+	// Print header row
+	var header strings.Builder
+	header.WriteString("|")
+	for i, col := range result.Columns {
+		header.WriteString(" ")
+		header.WriteString(padRight(col, widths[i]))
+		header.WriteString(" |")
+	}
+	fmt.Fprintln(f.writer, header.String())
+
+	// Print separator row
+	var sep strings.Builder
+	sep.WriteString("|")
+	for _, w := range widths {
+		sep.WriteString(" ")
+		sep.WriteString(strings.Repeat("-", w))
+		sep.WriteString(" |")
+	}
+	fmt.Fprintln(f.writer, sep.String())
+
+	// Print data rows
+	for _, row := range strRows {
+		var line strings.Builder
+		line.WriteString("|")
+		for i, val := range row {
+			if i < len(widths) {
+				line.WriteString(" ")
+				line.WriteString(padRight(val, widths[i]))
+				line.WriteString(" |")
+			}
+		}
+		fmt.Fprintln(f.writer, line.String())
+	}
+
+	// Row count and timing
+	count := len(result.Rows)
+	if count == 1 {
+		fmt.Fprintf(f.writer, "1 row in set (%s)\n", executor.FormatDuration(result.Duration))
+	} else {
+		fmt.Fprintf(f.writer, "%d rows in set (%s)\n", count, executor.FormatDuration(result.Duration))
+	}
+
+	return nil
+}
+
 // Helper functions
 
 func formatValue(v interface{}) string {
@@ -302,6 +385,38 @@ func padRight(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-runeCount)
+}
+
+// CalcTableWidth returns the display width (in runes) that a table-formatted
+// result would require. Returns 0 if the result has no columns.
+func CalcTableWidth(result *executor.QueryResult) int {
+	if result == nil || len(result.Columns) == 0 {
+		return 0
+	}
+
+	// Calculate column widths (same logic as writeTable)
+	widths := make([]int, len(result.Columns))
+	for i, col := range result.Columns {
+		widths[i] = utf8.RuneCountInString(col)
+	}
+	for _, row := range result.Rows {
+		for i, val := range row {
+			if i < len(widths) {
+				w := utf8.RuneCountInString(formatValue(val))
+				if w > widths[i] {
+					widths[i] = w
+				}
+			}
+		}
+	}
+
+	// Total width = sum of (column_width + 2 padding) + separators
+	// Format: | col1 | col2 | ... |  =>  1 + sum(width+2+1) = 1 + sum(width+3)
+	total := 1 // leading "|"
+	for _, w := range widths {
+		total += w + 3 // " value |" = 1 space + value + 1 space + "|"
+	}
+	return total
 }
 
 func formatDMLResult(result *executor.QueryResult) string {
