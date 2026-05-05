@@ -34,6 +34,13 @@ type Dependencies struct {
 	Highlighter         *highlight.Highlighter
 	Completer           *completer.Completer
 	AutoVerticalOutput  bool
+	SSHTunnel           TunnelCloser // nil if no SSH tunnel
+}
+
+// TunnelCloser is an interface for closing an SSH tunnel.
+type TunnelCloser interface {
+	Close() error
+	LocalAddr() string
 }
 
 // Model is the top-level bubbletea model for the mysh TUI.
@@ -100,6 +107,9 @@ type Model struct {
 
 	// Alias state
 	tempAliases map[string]string // session-only aliases
+
+	// Favorites state
+	tempFavorites map[string]config.FavoriteConfig // session-only favorites
 
 	// Pagination state
 	pagedResult *executor.QueryResult // result being paginated (nil = not paginating)
@@ -1002,6 +1012,40 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 				}
 			default:
 				m.switchSession(parts[1])
+			}
+		}
+
+	case "\\fav", "\\favorites":
+		if len(parts) < 2 {
+			m.listFavorites()
+		} else {
+			switch parts[1] {
+			case "+", "add":
+				if len(parts) < 3 {
+					m.addOutput("Usage: \\fav + <name> [description]")
+					m.addOutput("  Saves the last query as a favorite.")
+				} else {
+					desc := ""
+					if len(parts) >= 4 {
+						desc = strings.Join(parts[3:], " ")
+					}
+					m.addFavorite(parts[2], desc)
+				}
+			case "-", "del", "rm", "delete":
+				if len(parts) < 3 {
+					m.addOutput("Usage: \\fav - <name>")
+				} else {
+					m.deleteFavorite(parts[2])
+				}
+			case "show":
+				if len(parts) < 3 {
+					m.addOutput("Usage: \\fav show <name>")
+				} else {
+					m.showFavorite(parts[2])
+				}
+			default:
+				// Run a favorite by name
+				return m.runFavorite(parts[1])
 			}
 		}
 
@@ -2172,6 +2216,151 @@ func (m *Model) deleteSession(name string) {
 	}
 }
 
+// listFavorites displays all saved favorite queries.
+func (m *Model) listFavorites() {
+	count := 0
+
+	// Config file favorites
+	if m.deps.Config.Favorites != nil {
+		for name, fav := range m.deps.Config.Favorites {
+			preview := fav.SQL
+			if len(preview) > 60 {
+				preview = preview[:57] + "..."
+			}
+			desc := ""
+			if fav.Description != "" {
+				desc = fmt.Sprintf("  \033[2m(%s)\033[0m", fav.Description)
+			}
+			m.addOutput(fmt.Sprintf("  \033[1m%-20s\033[0m %s%s", name, preview, desc))
+			count++
+		}
+	}
+
+	// Temp favorites (session-only)
+	if m.tempFavorites != nil {
+		for name, fav := range m.tempFavorites {
+			preview := fav.SQL
+			if len(preview) > 60 {
+				preview = preview[:57] + "..."
+			}
+			desc := ""
+			if fav.Description != "" {
+				desc = fmt.Sprintf("  \033[2m(%s)\033[0m", fav.Description)
+			}
+			m.addOutput(fmt.Sprintf("  \033[1m%-20s\033[0m %s%s \033[33m(temp)\033[0m", name, preview, desc))
+			count++
+		}
+	}
+
+	if count == 0 {
+		m.addOutput("No favorites saved. Use \\fav + <name> [desc] to save the last query.")
+	} else {
+		m.addOutput(fmt.Sprintf("%d favorite(s). \\fav <name> to run, \\fav show <name> to view.", count))
+	}
+}
+
+// resolveFavorite finds a favorite by name (temp first, then config).
+func (m *Model) resolveFavorite(name string) (config.FavoriteConfig, bool) {
+	if m.tempFavorites != nil {
+		if fav, ok := m.tempFavorites[name]; ok {
+			return fav, true
+		}
+	}
+	if m.deps.Config.Favorites != nil {
+		if fav, ok := m.deps.Config.Favorites[name]; ok {
+			return fav, true
+		}
+	}
+	return config.FavoriteConfig{}, false
+}
+
+// addFavorite saves the last query as a favorite.
+func (m *Model) addFavorite(name, description string) {
+	if m.lastQuery == "" {
+		m.addOutput("No last query to save. Run a query first.")
+		return
+	}
+
+	fav := config.FavoriteConfig{
+		SQL:         m.lastQuery,
+		Description: description,
+	}
+
+	if m.deps.Config.Favorites == nil {
+		m.deps.Config.Favorites = make(map[string]config.FavoriteConfig)
+	}
+	m.deps.Config.Favorites[name] = fav
+
+	if err := config.Save(m.deps.Config); err != nil {
+		// Fallback to temp-only
+		if m.tempFavorites == nil {
+			m.tempFavorites = make(map[string]config.FavoriteConfig)
+		}
+		m.tempFavorites[name] = fav
+		m.addOutput(fmt.Sprintf("Save to config failed (%s), saved as temp favorite.", err))
+	}
+
+	desc := ""
+	if description != "" {
+		desc = fmt.Sprintf(" (%s)", description)
+	}
+	m.addOutput(fmt.Sprintf("Favorite '%s' saved%s.", name, desc))
+}
+
+// deleteFavorite removes a favorite by name.
+func (m *Model) deleteFavorite(name string) {
+	deleted := false
+
+	if m.tempFavorites != nil {
+		if _, ok := m.tempFavorites[name]; ok {
+			delete(m.tempFavorites, name)
+			deleted = true
+		}
+	}
+
+	if m.deps.Config.Favorites != nil {
+		if _, ok := m.deps.Config.Favorites[name]; ok {
+			delete(m.deps.Config.Favorites, name)
+			_ = config.Save(m.deps.Config)
+			deleted = true
+		}
+	}
+
+	if deleted {
+		m.addOutput(fmt.Sprintf("Favorite '%s' deleted.", name))
+	} else {
+		m.addOutput(fmt.Sprintf("Favorite '%s' not found.", name))
+	}
+}
+
+// showFavorite displays the full SQL of a favorite.
+func (m *Model) showFavorite(name string) {
+	fav, ok := m.resolveFavorite(name)
+	if !ok {
+		m.addOutput(fmt.Sprintf("Favorite '%s' not found.", name))
+		return
+	}
+	header := fmt.Sprintf("Favorite: \033[1m%s\033[0m", name)
+	if fav.Description != "" {
+		header += fmt.Sprintf("  \033[2m(%s)\033[0m", fav.Description)
+	}
+	m.addOutput(header)
+	m.addOutput(fav.SQL)
+}
+
+// runFavorite executes a saved favorite query.
+func (m Model) runFavorite(name string) (tea.Model, tea.Cmd) {
+	fav, ok := m.resolveFavorite(name)
+	if !ok {
+		m.addOutput(fmt.Sprintf("Favorite '%s' not found. Use \\fav to list.", name))
+		return m, nil
+	}
+	// Show which favorite is being run
+	m.addOutput(fmt.Sprintf("\033[2m→ fav %s: %s\033[0m", name, truncateStr(fav.SQL, 60)))
+	m.ed.Clear()
+	return m.executeInput(fav.SQL, output.FormatTable)
+}
+
 // formatStatus returns a human-readable connection status string.
 func (m Model) formatStatus() string {
 	var sb strings.Builder
@@ -2204,6 +2393,9 @@ func (m Model) formatStatus() string {
 	if m.deps.Meta != nil {
 		dbs := m.deps.Meta.Databases()
 		sb.WriteString(fmt.Sprintf("Cached databases: %d\n", len(dbs)))
+	}
+	if m.deps.SSHTunnel != nil {
+		sb.WriteString(fmt.Sprintf("SSH tunnel: via %s\n", m.deps.SSHTunnel.LocalAddr()))
 	}
 	return sb.String()
 }
@@ -2398,6 +2590,18 @@ func (m *Model) handleSys(cmdParts []string) {
 	}
 }
 
+// truncateStr truncates a string to maxLen runes, appending "..." if truncated.
+func truncateStr(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	if maxLen > 3 {
+		return string(runes[:maxLen-3]) + "..."
+	}
+	return string(runes[:maxLen])
+}
+
 // copyToClipboard copies text to the system clipboard using available tools.
 func copyToClipboard(text string) error {
 	// Try xclip first (most common on Linux)
@@ -2480,6 +2684,11 @@ Backslash commands:
   \session <name>   Switch to saved session
   \session save <n> Save current connection as session
   \session del <n>  Delete a saved session
+  \fav, \favorites   List favorite queries
+  \fav <name>        Execute a saved favorite
+  \fav + <n> [desc]  Save last query as favorite
+  \fav - <name>      Delete a favorite
+  \fav show <name>   Show favorite SQL
   \cd [dir]         Change/show working directory (for \source, \sys)
   \sys, \! <cmd>    Execute a system command
 

@@ -18,8 +18,9 @@ type Config struct {
 	History    HistoryConfig            `mapstructure:"history"`
 	Completion CompletionConfig         `mapstructure:"completion"`
 	Safety     SafetyConfig             `mapstructure:"safety"`
-	Aliases    map[string]string        `mapstructure:"aliases"`
-	Sessions   map[string]SessionConfig `mapstructure:"sessions"`
+	Aliases    map[string]string              `mapstructure:"aliases"`
+	Sessions   map[string]SessionConfig       `mapstructure:"sessions"`
+	Favorites  map[string]FavoriteConfig      `mapstructure:"favorites"`
 
 	// Internal: path to config file (for Save)
 	configPath string `mapstructure:"-"`
@@ -34,6 +35,21 @@ type ConnectionConfig struct {
 	Database string `mapstructure:"database"`
 	Charset  string `mapstructure:"charset"`
 	Timeout  int    `mapstructure:"timeout"` // connection timeout in seconds (0 = default 30s)
+	SSH      SSHConfig `mapstructure:"ssh"`
+}
+
+// SSHConfig holds SSH tunnel parameters for connecting through a jump host.
+type SSHConfig struct {
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	User     string `mapstructure:"user"`
+	Key      string `mapstructure:"key"`
+	Password string `mapstructure:"password"`
+}
+
+// Enabled returns true if SSH tunnel is configured.
+func (s SSHConfig) Enabled() bool {
+	return s.Host != ""
 }
 
 // SafetyConfig holds safety-related configuration.
@@ -69,6 +85,12 @@ type HistoryConfig struct {
 type CompletionConfig struct {
 	MinChars       int `mapstructure:"min_chars"`
 	MaxSuggestions int `mapstructure:"max_suggestions"`
+}
+
+// FavoriteConfig holds a saved favorite SQL query.
+type FavoriteConfig struct {
+	SQL         string `mapstructure:"sql"`
+	Description string `mapstructure:"description"`
 }
 
 // SessionConfig holds a saved database session connection config.

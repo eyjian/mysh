@@ -10,7 +10,7 @@ An enhanced MySQL command-line client that provides real-time SQL syntax highlig
 
 - **Syntax Highlighting** — Real-time coloring of SQL keywords, strings, numbers, comments, functions, and operators
 - **Smart Auto-Completion** — Context-aware suggestions for keywords, table names, column names, and database names
-- **SQL Snippets** — Built-in templates for CREATE TABLE, ALTER, INSERT, etc., auto-expand on Tab
+- **SQL Snippets** — Built-in templates for CREATE TABLE, ALTER, INSERT, etc., a\helputo-expand on Tab
 - **Interactive Editor** — Multi-line editing with cursor movement, history navigation, and selection
 - **External Editor** — Open `$EDITOR` (vim/vi) to edit SQL with `\edit`, auto-execute on save
 - **Command History** — Persistent history with search (`Ctrl+R`), navigation (Up/Down), and deduplication
@@ -22,6 +22,8 @@ An enhanced MySQL command-line client that provides real-time SQL syntax highlig
 - **NULL Display** — NULL values rendered in dim italic for clear visual distinction
 - **SQL Aliases** — Define shortcuts for frequently used queries in config or interactively
 - **Session Management** — Save, switch, and delete database connection profiles via `\session`
+- **Favorite Queries** — Bookmark SQL queries with `\fav`, list/run/delete interactively
+- **SSH Tunnel** — Connect to remote MySQL through an SSH jump host via local port forwarding
 - **Schema Metadata Cache** — Auto-cached table/column info with lazy refresh after DDL statements
 - **Configurable Themes** — Customizable color schemes via `~/.mysh.yaml`
 - **Zero Runtime Dependencies** — Single static binary, no CGO required
@@ -95,6 +97,11 @@ mysh root:password@tcp(127.0.0.1:3306)/mydb
 | `-p` | (empty) | MySQL password |
 | `-d` | (empty) | Default database |
 | `--config` | `~/.mysh.yaml` | Config file path |
+| `--ssh-host` | — | SSH tunnel host (jump server) |
+| `--ssh-port` | `22` | SSH tunnel port |
+| `--ssh-user` | — | SSH tunnel user |
+| `--ssh-key` | `~/.ssh/id_rsa` | SSH private key path |
+| `--ssh-password` | — | SSH password (prefer key auth) |
 | `--version` | — | Print version |
 | `--help` | — | Print help |
 
@@ -191,6 +198,53 @@ mysh> \session                     -- list all saved sessions
 mysh> \session del staging         -- delete a session
 ```
 
+### Favorite Queries
+
+Bookmark frequently used SQL queries:
+
+```sql
+mysh> SELECT * FROM users ORDER BY score DESC LIMIT 10;
+mysh> \fav + top10 Top 10 users   -- save last query as "top10"
+mysh> \fav top10                   -- run the saved favorite
+mysh> \fav                         -- list all favorites
+mysh> \fav show top10              -- view favorite SQL
+mysh> \fav - top10                 -- delete a favorite
+```
+
+Or configure in `~/.mysh.yaml`:
+
+```yaml
+favorites:
+  top_users:
+    sql: "SELECT * FROM users ORDER BY score DESC LIMIT 10"
+    description: "Top 10 users by score"
+```
+
+### SSH Tunnel
+
+Connect to MySQL servers through an SSH jump host:
+
+```bash
+# CLI flags
+mysh -h 10.0.0.5 --ssh-host jump.example.com --ssh-user deploy
+
+# With SSH key
+mysh -h db.internal --ssh-host bastion --ssh-user admin --ssh-key ~/.ssh/id_ed25519
+```
+
+Or configure in `~/.mysh.yaml`:
+
+```yaml
+connection:
+  host: "10.0.0.5"          # MySQL host (as seen from the SSH server)
+  port: 3306
+  ssh:
+    host: "jump.example.com"
+    port: 22
+    user: "deploy"
+    key: "~/.ssh/id_ed25519"
+```
+
 ## Configuration
 
 Configuration file: `~/.mysh.yaml`
@@ -246,6 +300,15 @@ sessions:
     port: 3306
     user: "dev"
     database: "myapp_dev"
+
+# Favorite queries
+favorites:
+  top_users:
+    sql: "SELECT * FROM users ORDER BY score DESC LIMIT 10"
+    description: "Top 10 users by score"
+  active_sessions:
+    sql: "SELECT * FROM information_schema.PROCESSLIST WHERE TIME > 5"
+    description: "Long-running sessions"
 ```
 
 Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syntax: `bold`, `italic`, `underline`, `dim`, plus color names (`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`) or hex codes (`#ff0000`).
@@ -274,6 +337,11 @@ Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syn
 | `\session <name>` | Switch to saved session |
 | `\session save <name>` | Save current connection as session |
 | `\session delete <name>` | Delete a saved session |
+| `\fav`, `\favorites` | List favorite queries |
+| `\fav <name>` | Execute a saved favorite |
+| `\fav + <name> [desc]` | Save last query as favorite |
+| `\fav - <name>` | Delete a favorite |
+| `\fav show <name>` | Show favorite SQL |
 | `\mouse` | Toggle mouse mode |
 | `\quit` | Exit mysh |
 

@@ -19,6 +19,7 @@ import (
 	"github.com/eyjian/mysh/history"
 	"github.com/eyjian/mysh/metadata"
 	"github.com/eyjian/mysh/output"
+	sshpkg "github.com/eyjian/mysh/ssh"
 	"github.com/eyjian/mysh/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -42,6 +43,11 @@ var (
 	flagSafeUpdates        bool
 	flagSlowThreshold      = -1 // -1 means not set, 0 means disabled
 	flagConnTimeout        = -1 // -1 means not set, 0 means default 30s
+	flagSSHHost            string
+	flagSSHPort            int
+	flagSSHUser            string
+	flagSSHKey             string
+	flagSSHPassword        string
 )
 
 func main() {
@@ -80,7 +86,46 @@ func main() {
 		cfg.UI.PageSize = flagPageSize
 	}
 
-	// Step 2: Connect to MySQL
+	// Override SSH config with CLI arguments
+	if flagSSHHost != "" {
+		cfg.Connection.SSH.Host = flagSSHHost
+	}
+	if flagSSHPort > 0 {
+		cfg.Connection.SSH.Port = flagSSHPort
+	}
+	if flagSSHUser != "" {
+		cfg.Connection.SSH.User = flagSSHUser
+	}
+	if flagSSHKey != "" {
+		cfg.Connection.SSH.Key = flagSSHKey
+	}
+	if flagSSHPassword != "" {
+		cfg.Connection.SSH.Password = flagSSHPassword
+	}
+
+	// Step 2: Establish SSH tunnel if configured
+	var tunnel *sshpkg.Tunnel
+	if cfg.Connection.SSH.Enabled() {
+		fmt.Fprintf(os.Stderr, "Establishing SSH tunnel to %s", cfg.Connection.SSH.Host)
+		if cfg.Connection.SSH.Port > 0 && cfg.Connection.SSH.Port != 22 {
+			fmt.Fprintf(os.Stderr, ":%d", cfg.Connection.SSH.Port)
+		}
+		fmt.Fprintf(os.Stderr, " ... ")
+
+		var tunnelErr error
+		tunnel, tunnelErr = sshpkg.NewTunnel(&cfg.Connection.SSH, cfg.Connection.Host, cfg.Connection.Port)
+		if tunnelErr != nil {
+			fmt.Fprintf(os.Stderr, "FAILED\nError: %s\n", tunnelErr)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "OK (local port %d)\n", tunnel.LocalPort())
+
+		// Override MySQL connection to go through the tunnel
+		cfg.Connection.Host = "127.0.0.1"
+		cfg.Connection.Port = tunnel.LocalPort()
+	}
+
+	// Step 3: Connect to MySQL
 	fmt.Fprintf(os.Stderr, "Connecting to %s@%s:%d", cfg.Connection.User, cfg.Connection.Host, cfg.Connection.Port)
 	if cfg.Connection.Database != "" {
 		fmt.Fprintf(os.Stderr, "/%s", cfg.Connection.Database)
@@ -178,6 +223,7 @@ func main() {
 		Highlighter:        highlighter,
 		Completer:          comp,
 		AutoVerticalOutput: flagAutoVerticalOutput,
+		SSHTunnel:          tunnel,
 	}
 
 	model := tui.NewModel(deps)
@@ -338,6 +384,31 @@ func parseArgs() error {
 				fmt.Sscanf(args[i+1], "%d", &flagConnTimeout)
 				i++
 			}
+		case "--ssh-host":
+			if i+1 < len(args) {
+				flagSSHHost = args[i+1]
+				i++
+			}
+		case "--ssh-port":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &flagSSHPort)
+				i++
+			}
+		case "--ssh-user":
+			if i+1 < len(args) {
+				flagSSHUser = args[i+1]
+				i++
+			}
+		case "--ssh-key":
+			if i+1 < len(args) {
+				flagSSHKey = args[i+1]
+				i++
+			}
+		case "--ssh-password":
+			if i+1 < len(args) {
+				flagSSHPassword = args[i+1]
+				i++
+			}
 		case "--help", "-help":
 			printUsage()
 			os.Exit(0)
@@ -380,6 +451,11 @@ Options:
   -U, --safe-updates      Block UPDATE/DELETE without WHERE or LIMIT
       --slow-threshold <s>  Slow query warning threshold in seconds (0 = disabled)
       --connect-timeout <s>  Connection/query timeout in seconds (default: 30)
+      --ssh-host <host>  SSH tunnel host (jump server)
+      --ssh-port <port>  SSH tunnel port (default: 22)
+      --ssh-user <user>  SSH tunnel user
+      --ssh-key <path>   SSH private key path (default: ~/.ssh/id_rsa)
+      --ssh-password <p> SSH password (prefer key auth)
       --help              Show this help message
       --version           Show version
 
@@ -394,7 +470,9 @@ Examples:
   mysh -e "SELECT * FROM users" --format markdown
   mysh -e "SHOW TABLES" --format json
   mysh --default-character-set utf8mb4
-  mysh -U --slow-threshold 5`)
+  mysh -U --slow-threshold 5
+  mysh -h 10.0.0.5 --ssh-host jump.example.com --ssh-user deploy
+  mysh -h db.internal --ssh-host bastion --ssh-key ~/.ssh/id_ed25519`)
 }
 
 // cleanup performs graceful shutdown of all resources.
@@ -410,6 +488,13 @@ func cleanup(deps tui.Dependencies) {
 	if deps.Pool != nil {
 		if err := deps.Pool.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to close connection: %s\n", err)
+		}
+	}
+
+	// Close SSH tunnel
+	if deps.SSHTunnel != nil {
+		if err := deps.SSHTunnel.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close SSH tunnel: %s\n", err)
 		}
 	}
 
