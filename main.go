@@ -38,6 +38,7 @@ var (
 	flagAutoVerticalOutput bool
 	flagFormat             string
 	flagCharset            string
+	flagPageSize           = -1 // -1 means not set, 0 means no pagination
 )
 
 func main() {
@@ -71,6 +72,9 @@ func main() {
 	}
 	if flagCharset != "" {
 		cfg.Connection.Charset = flagCharset
+	}
+	if flagPageSize >= 0 {
+		cfg.UI.PageSize = flagPageSize
 	}
 
 	// Step 2: Connect to MySQL
@@ -297,6 +301,11 @@ func parseArgs() error {
 				flagCharset = args[i+1]
 				i++
 			}
+		case "--page-size":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &flagPageSize)
+				i++
+			}
 		case "--help", "-help":
 			printUsage()
 			os.Exit(0)
@@ -335,6 +344,7 @@ Options:
       --format <type>     Output format: table|vertical|json|markdown
       --default-character-set <name> Set the default character set
       --auto-vertical-output   Auto switch to vertical if result wider than terminal
+      --page-size <n>     Result pagination rows (0 = no pagination, default: 0)
       --help              Show this help message
       --version           Show version
 
