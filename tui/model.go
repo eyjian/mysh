@@ -54,7 +54,8 @@ type Model struct {
 	// UI state
 	width       int
 	height      int
-	output      []string   // accumulated output lines
+	output      []string   // accumulated output lines (internal tracking)
+	pendingPrintLines []string // lines waiting to be printed via tea.Println
 	err         error      // last error
 	quitting    bool
 	executing   bool       // true while a query is running
@@ -68,9 +69,6 @@ type Model struct {
 	// Cursor blink state
 	cursorOn    bool
 	cursorTick  bool // true when cursor blink tick is active
-
-	// Output scroll state
-	scrollOffset int // 0 = bottom (latest), >0 = scrolled up
 
 	// Multi-line accumulation
 	multilineParts []string // collected lines during multi-line input
@@ -220,103 +218,92 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, nil
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		var newM tea.Model
+		newM, cmd = m.handleKey(msg)
+		m = newM.(Model)
 
 	case tea.MouseMsg:
-		return m.handleMouse(msg)
+		var newM tea.Model
+		newM, cmd = m.handleMouse(msg)
+		m = newM.(Model)
 
 	case blinkMsg:
 		m.cursorOn = !m.cursorOn
-		return m, blinkCmd()
+		cmd = blinkCmd()
 
 	case healthCheckMsg:
 		if m.deps.Pool != nil {
 			m.connected = m.deps.Pool.IsConnected()
 		}
-		return m, healthCheckCmd()
+		cmd = healthCheckCmd()
 
 	case tickMsg:
 		m.executing = false
-		return m, nil
 
 	case execResultMsg:
 		m.executing = false
 		m.execStart = time.Time{}
 		m.spinnerFrame = 0
-		m.displayQueryResult(msg.result, msg.err, msg.formatOverride)
-		return m, nil
+		cmd = m.displayQueryResult(msg.result, msg.err, msg.formatOverride)
 
 	case execTickMsg:
 		if m.executing {
 			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
-			return m, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+			cmd = tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
 				return execTickMsg(t)
 			})
 		}
-		return m, nil
 
 	case watchTickMsg:
 		if m.watching {
 			m.watchTick++
-			return m, m.executeWatchQuery(m.watchTick)
+			cmd = m.executeWatchQuery(m.watchTick)
 		}
-		return m, nil
 
 	case watchResultMsg:
-		if !m.watching {
-			return m, nil
-		}
-		// Clear output and show only the latest watch result
-		m.output = nil
-		m.scrollOffset = 0
-		m.addOutput(fmt.Sprintf("\033[2m--- Watch #%d (%s) ---\033[0m", msg.tick, time.Now().Format("15:04:05")))
+		if m.watching {
+			// Clear the terminal screen for watch mode (show only latest result)
+			m.pendingPrintLines = append(m.pendingPrintLines, "\033[2J\033[H")
+			m.output = nil
+			m.addOutput(fmt.Sprintf("\033[2m--- Watch #%d (%s) ---\033[0m", msg.tick, time.Now().Format("15:04:05")))
 
-		if msg.err != nil {
-			m.addOutput(fmt.Sprintf("Error: %s", msg.err))
-		} else {
-			m.displayQueryResult(msg.result, msg.err, m.watchFormat)
+			if msg.err != nil {
+				m.addOutput(fmt.Sprintf("Error: %s", msg.err))
+				cmd = watchTickCmd(m.watchInterval)
+			} else {
+				resultCmd := m.displayQueryResult(msg.result, msg.err, m.watchFormat)
+				tickCmd := watchTickCmd(m.watchInterval)
+				cmd = tea.Batch(resultCmd, tickCmd)
+			}
 		}
-
-		// Schedule next tick
-		return m, watchTickCmd(m.watchInterval)
 	}
 
-	return m, nil
+	// Flush any pending output lines via tea.Println so they scroll naturally
+	if flushCmd := m.flushPrintLines(); flushCmd != nil {
+		if cmd != nil {
+			cmd = tea.Batch(cmd, flushCmd)
+		} else {
+			cmd = flushCmd
+		}
+	}
+
+	return m, cmd
 }
 
-// handleMouse processes mouse events — scroll wheel controls output area scrolling.
+// handleMouse processes mouse events.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if !m.mouseEnabled {
 		return m, nil
 	}
-	switch msg.Type {
-	case tea.MouseWheelUp:
-		if m.scrollOffset < len(m.output)-1 {
-			m.scrollOffset += 3 // scroll 3 lines at a time
-			if m.scrollOffset > len(m.output)-1 {
-				m.scrollOffset = len(m.output) - 1
-			}
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
-			}
-		}
-		return m, nil
-	case tea.MouseWheelDown:
-		if m.scrollOffset > 0 {
-			m.scrollOffset -= 3
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
-			}
-		}
-		return m, nil
-	}
+	// Scrolling is handled by terminal's scrollback buffer
 	return m, nil
 }
 
@@ -458,30 +445,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPgUp:
-		// Scroll output up by one page
-		maxOutputLines := m.height - 3
-		if maxOutputLines < 1 {
-			maxOutputLines = 10
-		}
-		m.scrollOffset += maxOutputLines
-		if m.scrollOffset > len(m.output)-1 {
-			m.scrollOffset = len(m.output) - 1
-		}
-		if m.scrollOffset < 0 {
-			m.scrollOffset = 0
-		}
+		// Scrolling handled by terminal's scrollback buffer
 		return m, nil
 
 	case tea.KeyPgDown:
-		// Scroll output down by one page
-		maxOutputLines := m.height - 3
-		if maxOutputLines < 1 {
-			maxOutputLines = 10
-		}
-		m.scrollOffset -= maxOutputLines
-		if m.scrollOffset < 0 {
-			m.scrollOffset = 0
-		}
+		// Scrolling handled by terminal's scrollback buffer
 		return m, nil
 
 	case tea.KeyBackspace:
@@ -754,7 +722,6 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if lowerCmd == "clear" {
 		m.ed.Clear()
 		m.output = nil
-		m.scrollOffset = 0
 		return m, nil
 	}
 	// Handle "source <file>" (MySQL-style command)
@@ -805,29 +772,11 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "\\help", "\\h", "\\?":
-		helpContent := helpText()
-		helpLines := strings.Count(helpContent, "\n") + 1
-		visibleLines := m.height - 3
-		if visibleLines < 1 {
-			visibleLines = 10
-		}
-		if helpLines > visibleLines {
-			// Help text exceeds terminal height — remove the echo line from
-			// TUI output buffer (we'll include it in the direct terminal print
-			// instead), then print directly via subprocess so scrollback
-			// captures everything including the echo line.
-			echoLine := ""
-			if len(m.output) > 0 {
-				echoLine = m.output[len(m.output)-1]
-				m.output = m.output[:len(m.output)-1]
-			}
-			return m, printHelpCmd(echoLine, helpContent)
-		}
-		m.addOutput(helpContent)
+		m.addOutput(helpText())
 
 	case "\\clear", "\\c":
 		m.output = nil
-		m.scrollOffset = 0
+		m.pendingPrintLines = append(m.pendingPrintLines, "\033[2J\033[H")
 
 	case "\\status", "\\s":
 		m.addOutput(m.formatStatus())
@@ -1250,7 +1199,6 @@ func (m Model) execSourceFile(filePath string) (tea.Model, tea.Cmd) {
 	}
 
 	m.addOutput(fmt.Sprintf("Source: %s (%d statements executed)", filePath, successCount))
-	m.scrollOffset = 0
 	return m, nil
 }
 
@@ -1303,7 +1251,9 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 }
 
 // displayQueryResult handles formatting and displaying a completed query result.
-func (m *Model) displayQueryResult(result *executor.QueryResult, err error, formatOverride output.Format) {
+// It returns a tea.Cmd that may be non-nil if the result needs to be printed
+// directly to terminal via ExecProcess (for large results exceeding terminal height).
+func (m *Model) displayQueryResult(result *executor.QueryResult, err error, formatOverride output.Format) tea.Cmd {
 	m.ed.Clear()
 
 	// Update connection health based on result
@@ -1322,7 +1272,7 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 		} else {
 			m.addOutput(fmt.Sprintf("%s", errMsg))
 		}
-		return
+		return nil
 	}
 
 	// Show reconnection warning if auto-reconnected
@@ -1342,10 +1292,7 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 	if formatOverride != output.FormatTable {
 		outFmt = formatOverride
 	} else if m.autoVerticalOutput && outFmt == output.FormatTable && m.width > 0 {
-		// With smart column truncation, use table format if it fits after truncation
-		if m.deps.Formatter.MaxWidth() > 0 {
-			// Smart truncation is enabled, use table format
-		} else if output.CalcTableWidth(result) > m.width {
+		if output.CalcTableWidth(result) > m.width {
 			outFmt = output.FormatVertical
 		}
 	}
@@ -1355,16 +1302,13 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 	if result.IsQuery && pageSize > 0 && len(result.Rows) > pageSize {
 		m.enterPagination(result, outFmt)
 		m.addOutput(m.renderPagedResult())
-		return
+		return nil
 	}
 
-	// Format and display result
+	// Format result (no column truncation — data should never be cut off)
 	var buf strings.Builder
 	formatter := output.NewFormatter(outFmt, &buf)
 	formatter.SetShowTiming(m.showTiming)
-	if m.width > 0 && outFmt == output.FormatTable {
-		formatter.SetMaxWidth(m.width)
-	}
 	if writeErr := formatter.WriteResult(result); writeErr != nil {
 		m.addOutput(fmt.Sprintf("Output error: %s", writeErr))
 	}
@@ -1377,6 +1321,7 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 		m.lastResult = result
 		m.lastFormat = outFmt
 	}
+	return nil
 }
 
 // enterPagination starts pagination mode for a large result set.
@@ -1419,9 +1364,6 @@ func (m *Model) renderPagedResult() string {
 
 	var buf strings.Builder
 	formatter := output.NewFormatter(m.pagedFormat, &buf)
-	if m.width > 0 && m.pagedFormat == output.FormatTable {
-		formatter.SetMaxWidth(m.width)
-	}
 	formatter.WriteResult(partial)
 
 	// Append pager prompt with ANSI styling
@@ -1435,8 +1377,6 @@ func (m Model) handlePagedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter, tea.KeySpace, tea.KeyDown, tea.KeyPgDown:
 		if m.pagedPage < m.pagedTotal-1 {
-			// Remove previous page output and prompt (last rendered page lines + prompt)
-			m.removeLastPagedOutput()
 			m.pagedPage++
 			m.addOutput(m.renderPagedResult())
 		} else {
@@ -1444,7 +1384,6 @@ func (m Model) handlePagedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyUp, tea.KeyPgUp:
 		if m.pagedPage > 0 {
-			m.removeLastPagedOutput()
 			m.pagedPage--
 			m.addOutput(m.renderPagedResult())
 		}
@@ -1468,13 +1407,8 @@ func (m Model) handlePagedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // exitPagination exits pagination mode, optionally showing all remaining rows.
 func (m *Model) exitPagination(showAll bool) {
 	if showAll && m.pagedResult != nil {
-		// Remove the last paged page and show full result
-		m.removeLastPagedOutput()
 		var buf strings.Builder
 		formatter := output.NewFormatter(m.pagedFormat, &buf)
-		if m.width > 0 && m.pagedFormat == output.FormatTable {
-			formatter.SetMaxWidth(m.width)
-		}
 		formatter.WriteResult(m.pagedResult)
 		m.addOutput(strings.TrimRight(buf.String(), "\n"))
 	}
@@ -1482,21 +1416,6 @@ func (m *Model) exitPagination(showAll bool) {
 	m.pagedFormat = output.FormatTable
 	m.pagedPage = 0
 	m.pagedTotal = 0
-}
-
-// removeLastPagedOutput removes the lines from the last rendered paged result
-// from the output buffer. It removes lines until it finds the pager prompt marker.
-func (m *Model) removeLastPagedOutput() {
-	// Remove lines from the end until we've removed the pager prompt line
-	// The pager prompt contains "-- More --"
-	for len(m.output) > 0 {
-		lastIdx := len(m.output) - 1
-		lastLine := m.output[lastIdx]
-		m.output = m.output[:lastIdx]
-		if strings.Contains(lastLine, "-- More") {
-			break
-		}
-	}
 }
 
 // handleEdit opens the user's editor ($EDITOR or vi) with the current input buffer
@@ -1739,39 +1658,10 @@ func (m Model) handleTab() (tea.Model, tea.Cmd) {
 // View implements tea.Model.
 func (m Model) View() string {
 	if m.quitting {
-		var sb strings.Builder
-		// Preserve existing output
-		for _, line := range m.output {
-			sb.WriteString(line)
-			sb.WriteString("\n")
-		}
-		sb.WriteString("Goodbye!\n")
-		return sb.String()
+		return "Goodbye!\n"
 	}
 
 	var sb strings.Builder
-
-	// Output area (scrollable region)
-	totalLines := len(m.output)
-	maxOutputLines := m.height - 3 // leave room for prompt + completion
-	if maxOutputLines < 1 {
-		maxOutputLines = 10
-	}
-	start := 0
-	if totalLines > maxOutputLines {
-		start = totalLines - maxOutputLines - m.scrollOffset
-		if start < 0 {
-			start = 0
-		}
-	}
-	end := start + maxOutputLines
-	if end > totalLines {
-		end = totalLines
-	}
-	for i := start; i < end; i++ {
-		sb.WriteString(m.output[i])
-		sb.WriteString("\n")
-	}
 
 	// Prompt line
 	if m.executing {
@@ -1886,10 +1776,33 @@ func (m Model) View() string {
 	return sb.String()
 }
 
-// addOutput appends lines to the output buffer.
+// addOutput appends lines to the output buffer and queues them for
+// printing via tea.Println. Output is printed directly to the terminal
+// (scrolling naturally) rather than being re-rendered by View() each frame.
 func (m *Model) addOutput(text string) {
 	lines := strings.Split(text, "\n")
-	m.output = append(m.output, lines...)
+	for _, line := range lines {
+		m.output = append(m.output, line)
+		m.pendingPrintLines = append(m.pendingPrintLines, line)
+	}
+	// Cap the output buffer to prevent excessive memory usage.
+	// The terminal's scrollback buffer will preserve older content.
+	const maxOutputBufferLines = 10000
+	if len(m.output) > maxOutputBufferLines {
+		m.output = m.output[len(m.output)-maxOutputBufferLines:]
+	}
+}
+
+// flushPrintLines returns a tea.Cmd that prints all pending output lines
+// directly to the terminal via tea.Println. After flushing, pendingPrintLines
+// is cleared. This ensures output scrolls naturally in the terminal.
+func (m *Model) flushPrintLines() tea.Cmd {
+	if len(m.pendingPrintLines) == 0 {
+		return nil
+	}
+	text := strings.Join(m.pendingPrintLines, "\n")
+	m.pendingPrintLines = nil
+	return tea.Println(text)
 }
 
 // handleConnect handles the \connect command to switch database connections.
@@ -2479,7 +2392,7 @@ func (m *Model) handleDesc(parts []string) {
 			}
 			result.Rows = append(result.Rows, []any{name, g.idxType, unique, strings.Join(g.columns, ", ")})
 		}
-		m.displayQueryResult(result, nil, output.FormatTable)
+		_ = m.displayQueryResult(result, nil, output.FormatTable)
 
 	case "full":
 		// Full column info using SHOW FULL COLUMNS
@@ -2489,7 +2402,7 @@ func (m *Model) handleDesc(parts []string) {
 			m.addOutput(fmt.Sprintf("ERROR: %s", err))
 			return
 		}
-		m.displayQueryResult(result, nil, output.FormatTable)
+		_ = m.displayQueryResult(result, nil, output.FormatTable)
 
 	default: // "columns"
 		result, err := m.deps.Executor.Execute(context.Background(),
@@ -2498,7 +2411,7 @@ func (m *Model) handleDesc(parts []string) {
 			m.addOutput(fmt.Sprintf("ERROR: %s", err))
 			return
 		}
-		m.displayQueryResult(result, nil, output.FormatTable)
+		_ = m.displayQueryResult(result, nil, output.FormatTable)
 	}
 }
 
@@ -2655,23 +2568,6 @@ func copyToClipboard(text string) error {
 	}
 
 	return fmt.Errorf("no clipboard tool found (install xclip, xsel, pbcopy, or wl-copy)")
-}
-
-// printHelpCmd returns a tea.Cmd that temporarily exits the TUI and prints
-// the echo line + help text to the terminal using a simple cat command, so
-// terminal scrollback captures the full output including the user's input echo.
-func printHelpCmd(echoLine, content string) tea.Cmd {
-	fullContent := content
-	if echoLine != "" {
-		fullContent = echoLine + "\n" + content
-	}
-	return tea.ExecProcess(
-		exec.Command("sh", "-c", fmt.Sprintf("cat <<'MYSH_HELP_EOF'\n%s\nMYSH_HELP_EOF", fullContent)),
-		func(err error) tea.Msg {
-			_ = err
-			return nil
-		},
-	)
 }
 
 // helpText returns the help message for backslash commands.

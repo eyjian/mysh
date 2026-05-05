@@ -357,6 +357,8 @@ func parseArgs() error {
 			}
 		case "--auto-vertical-output":
 			flagAutoVerticalOutput = true
+		case "--no-auto-vertical-output":
+			flagAutoVerticalOutput = false
 		case "--format":
 			if i+1 < len(args) {
 				flagFormat = args[i+1]
@@ -447,6 +449,7 @@ Options:
       --format <type>     Output format: table|vertical|json|markdown
       --default-character-set <name> Set the default character set
       --auto-vertical-output   Auto switch to vertical if result wider than terminal
+      --no-auto-vertical-output  Disable auto vertical output (default)
       --page-size <n>     Result pagination rows (0 = no pagination, default: 0)
   -U, --safe-updates      Block UPDATE/DELETE without WHERE or LIMIT
       --slow-threshold <s>  Slow query warning threshold in seconds (0 = disabled)

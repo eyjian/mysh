@@ -629,9 +629,15 @@ func TestView_WithCompletion(t *testing.T) {
 func TestView_WithOutput(t *testing.T) {
 	m := newTestModel()
 	m.addOutput("Hello World")
+	// Output is now printed via tea.Println, not rendered in View()
+	// Check that the output was queued for printing
+	if len(m.pendingPrintLines) == 0 {
+		t.Error("expected pending print lines after addOutput")
+	}
+	// View() should not contain the output text (it's printed above the view)
 	view := m.View()
-	if !strings.Contains(view, "Hello World") {
-		t.Error("expected output text in view")
+	if strings.Contains(view, "Hello World") {
+		t.Error("output text should not be in View() - it's printed via tea.Println")
 	}
 }
 

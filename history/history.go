@@ -95,8 +95,9 @@ func (h *History) Append(entry string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Skip if duplicate of last entry
+	// Skip if duplicate of last entry (but still reset navigation position)
 	if len(h.entries) > 0 && h.entries[len(h.entries)-1] == entry {
+		h.pos = -1
 		return
 	}
 
