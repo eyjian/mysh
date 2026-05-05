@@ -43,13 +43,13 @@ detect_arch() {
     esac
 }
 
-# Get latest version from GitHub
+# Get latest version from GitHub API
 get_latest_version() {
     local version
-    version=$(curl -sfL "${GITHUB_BASE}/releases/latest" 2>/dev/null | grep -oP 'tag/\K[^"]+' || true)
-    if [ -z "$version" ]; then
-        version=$(curl -sfL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
-    fi
+    # Use GitHub API with Accept header to get clean JSON
+    version=$(curl -sfL -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+        | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/' || true)
     echo "${version:-latest}"
 }
 
@@ -66,11 +66,34 @@ download_binary() {
     local url="${GITHUB_BASE}/releases/download/${version}/${filename}"
 
     info "Downloading mysh ${version} for ${os}/${arch}..."
+    info "URL: ${url}"
     local tmp_file
     tmp_file=$(mktemp)
 
-    if ! curl -sfL -o "$tmp_file" "$url"; then
+    local http_code
+    http_code=$(curl -sfL -o "$tmp_file" -w "%{http_code}" "$url" 2>/dev/null || true)
+
+    if [ "$http_code" != "200" ]; then
         rm -f "$tmp_file"
+        warn "Download failed (HTTP ${http_code:-unknown})"
+        return 1
+    fi
+
+    # Verify it's a real binary (not an HTML error page)
+    local file_type
+    file_type=$(file "$tmp_file" 2>/dev/null || echo "unknown")
+    if echo "$file_type" | grep -qi "html\|text"; then
+        rm -f "$tmp_file"
+        warn "Downloaded file is not a valid binary (got HTML/text)"
+        return 1
+    fi
+
+    # Verify file size (> 1MB expected)
+    local file_size
+    file_size=$(stat -f%z "$tmp_file" 2>/dev/null || stat -c%s "$tmp_file" 2>/dev/null || echo "0")
+    if [ "$file_size" -lt 1048576 ]; then
+        rm -f "$tmp_file"
+        warn "Downloaded file is too small (${file_size} bytes), likely not a valid binary"
         return 1
     fi
 
@@ -81,7 +104,7 @@ download_binary() {
 go_install() {
     info "Attempting installation via 'go install'..."
     if ! command -v go &>/dev/null; then
-        error "Go is not installed. Please install Go 1.21+ or download the binary manually from ${GITHUB_BASE}/releases"
+        error "Go is not installed. Please install Go 1.24+ or download the binary manually from ${GITHUB_BASE}/releases"
     fi
 
     info "Running: go install github.com/${REPO}@latest"
