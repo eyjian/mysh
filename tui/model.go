@@ -18,6 +18,7 @@ import (
 	"github.com/eyjian/mysh/history"
 	"github.com/eyjian/mysh/metadata"
 	"github.com/eyjian/mysh/output"
+	sshpkg "github.com/eyjian/mysh/ssh"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -34,7 +35,7 @@ type Dependencies struct {
 	Highlighter         *highlight.Highlighter
 	Completer           *completer.Completer
 	AutoVerticalOutput  bool
-	SSHTunnel           TunnelCloser // nil if no SSH tunnel
+	SSHTunnel           *sshpkg.Tunnel // nil if no SSH tunnel
 }
 
 // TunnelCloser is an interface for closing an SSH tunnel.
@@ -111,7 +112,7 @@ type Model struct {
 	// Favorites state
 	tempFavorites map[string]config.FavoriteConfig // session-only favorites
 
-	// Pagination state
+	// Pagination state (query results)
 	pagedResult *executor.QueryResult // result being paginated (nil = not paginating)
 	pagedFormat output.Format         // format for paged result
 	pagedPage   int                   // current page number (0-based)
@@ -804,20 +805,25 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "\\help", "\\h", "\\?":
-		echoIdx := len(m.output) - 1 // index of the echo line just added
-		m.addOutput(helpText())
-		// Auto-scroll so the echo line ("mysh> \help") is visible at the top
-		maxLines := m.height - 3
-		if maxLines < 1 {
-			maxLines = 10
+		helpContent := helpText()
+		helpLines := strings.Count(helpContent, "\n") + 1
+		visibleLines := m.height - 3
+		if visibleLines < 1 {
+			visibleLines = 10
 		}
-		totalAfterHelp := len(m.output)
-		if totalAfterHelp > maxLines {
-			m.scrollOffset = totalAfterHelp - maxLines - echoIdx
-			if m.scrollOffset < 0 {
-				m.scrollOffset = 0
+		if helpLines > visibleLines {
+			// Help text exceeds terminal height — remove the echo line from
+			// TUI output buffer (we'll include it in the direct terminal print
+			// instead), then print directly via subprocess so scrollback
+			// captures everything including the echo line.
+			echoLine := ""
+			if len(m.output) > 0 {
+				echoLine = m.output[len(m.output)-1]
+				m.output = m.output[:len(m.output)-1]
 			}
+			return m, printHelpCmd(echoLine, helpContent)
 		}
+		m.addOutput(helpContent)
 
 	case "\\clear", "\\c":
 		m.output = nil
@@ -1746,12 +1752,11 @@ func (m Model) View() string {
 	var sb strings.Builder
 
 	// Output area (scrollable region)
+	totalLines := len(m.output)
 	maxOutputLines := m.height - 3 // leave room for prompt + completion
 	if maxOutputLines < 1 {
 		maxOutputLines = 10
 	}
-	totalLines := len(m.output)
-	// Default: show the latest lines (scrollOffset = 0 means bottom)
 	start := 0
 	if totalLines > maxOutputLines {
 		start = totalLines - maxOutputLines - m.scrollOffset
@@ -2650,6 +2655,23 @@ func copyToClipboard(text string) error {
 	}
 
 	return fmt.Errorf("no clipboard tool found (install xclip, xsel, pbcopy, or wl-copy)")
+}
+
+// printHelpCmd returns a tea.Cmd that temporarily exits the TUI and prints
+// the echo line + help text to the terminal using a simple cat command, so
+// terminal scrollback captures the full output including the user's input echo.
+func printHelpCmd(echoLine, content string) tea.Cmd {
+	fullContent := content
+	if echoLine != "" {
+		fullContent = echoLine + "\n" + content
+	}
+	return tea.ExecProcess(
+		exec.Command("sh", "-c", fmt.Sprintf("cat <<'MYSH_HELP_EOF'\n%s\nMYSH_HELP_EOF", fullContent)),
+		func(err error) tea.Msg {
+			_ = err
+			return nil
+		},
+	)
 }
 
 // helpText returns the help message for backslash commands.
