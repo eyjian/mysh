@@ -84,7 +84,8 @@ func (f *Formatter) WriteResult(result *executor.QueryResult) error {
 
 	// Handle errors
 	if result.Error != nil {
-		_, err := fmt.Fprintf(f.writer, "ERROR: %s\n", result.Error.Error())
+		_, err := fmt.Fprintf(f.writer, "%sERROR:%s %s\n",
+			ansiRed+ansiBold, ansiReset, result.Error.Error())
 		return err
 	}
 
@@ -121,21 +122,30 @@ func (f *Formatter) writeTable(result *executor.QueryResult) error {
 		return nil
 	}
 
-	// Convert rows to strings for width calculation
-	strRows := make([][]string, len(result.Rows))
+	// Convert rows to plain strings for width calculation
+	plainRows := make([][]string, len(result.Rows))
 	for i, row := range result.Rows {
-		strRows[i] = make([]string, len(row))
+		plainRows[i] = make([]string, len(row))
 		for j, val := range row {
-			strRows[i][j] = formatValue(val)
+			plainRows[i][j] = formatValue(val)
 		}
 	}
 
-	// Calculate column widths
+	// Convert rows to styled strings for display
+	styledRows := make([][]string, len(result.Rows))
+	for i, row := range result.Rows {
+		styledRows[i] = make([]string, len(row))
+		for j, val := range row {
+			styledRows[i][j] = formatValueStyled(val)
+		}
+	}
+
+	// Calculate column widths (using plain text, no ANSI codes)
 	widths := make([]int, len(result.Columns))
 	for i, col := range result.Columns {
 		widths[i] = utf8.RuneCountInString(col)
 	}
-	for _, row := range strRows {
+	for _, row := range plainRows {
 		for i, val := range row {
 			if i < len(widths) {
 				w := utf8.RuneCountInString(val)
@@ -161,31 +171,28 @@ func (f *Formatter) writeTable(result *executor.QueryResult) error {
 	fmt.Fprintln(f.writer, header.String())
 	fmt.Fprintln(f.writer, separator)
 
-	// Print rows
-	for _, row := range strRows {
+	// Print rows (using styled values)
+	for _, row := range styledRows {
 		var line strings.Builder
 		line.WriteString("|")
 		for i, val := range row {
 			if i < len(widths) {
 				line.WriteString(" ")
-				line.WriteString(padRight(val, widths[i]))
+				line.WriteString(padRightStyled(val, widths[i]))
 				line.WriteString(" |")
 			}
 		}
 		fmt.Fprintln(f.writer, line.String())
 	}
 
-	if len(strRows) > 0 {
+	if len(styledRows) > 0 {
 		fmt.Fprintln(f.writer, separator)
 	}
 
 	// Row count and timing
-	count := len(result.Rows)
-	if count == 1 {
-		fmt.Fprintf(f.writer, "1 row in set (%s)\n", executor.FormatDuration(result.Duration))
-	} else {
-		fmt.Fprintf(f.writer, "%d rows in set (%s)\n", count, executor.FormatDuration(result.Duration))
-	}
+	fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
+		ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset,
+		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
 
 	return nil
 }
@@ -211,20 +218,19 @@ func (f *Formatter) writeVertical(result *executor.QueryResult) error {
 		}
 		fmt.Fprintf(f.writer, "*************************** %d. row ***************************\n", rowIdx+1)
 		for i, col := range result.Columns {
-			val := "NULL"
-			if i < len(row) && row[i] != nil {
-				val = formatValue(row[i])
+			var val string
+			if i < len(row) {
+				val = formatValueStyled(row[i])
+			} else {
+				val = formatValueStyled(nil)
 			}
 			fmt.Fprintf(f.writer, "%s: %s\n", padRight(col, labelWidth), val)
 		}
 	}
 
-	count := len(result.Rows)
-	if count == 1 {
-		fmt.Fprintf(f.writer, "1 row in set (%s)\n", executor.FormatDuration(result.Duration))
-	} else {
-		fmt.Fprintf(f.writer, "%d rows in set (%s)\n", count, executor.FormatDuration(result.Duration))
-	}
+	fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
+		ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset,
+		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
 
 	return nil
 }
@@ -256,11 +262,9 @@ func (f *Formatter) writeJSON(result *executor.QueryResult) error {
 	}
 
 	count := len(result.Rows)
-	if count == 1 {
-		fmt.Fprintf(f.writer, "1 row in set (%s)\n", executor.FormatDuration(result.Duration))
-	} else {
-		fmt.Fprintf(f.writer, "%d rows in set (%s)\n", count, executor.FormatDuration(result.Duration))
-	}
+	fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
+		ansiGreen, count, pluralRow(count), ansiReset,
+		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
 
 	return nil
 }
@@ -271,21 +275,30 @@ func (f *Formatter) writeMarkdown(result *executor.QueryResult) error {
 		return nil
 	}
 
-	// Convert rows to strings for width calculation
-	strRows := make([][]string, len(result.Rows))
+	// Convert rows to plain strings for width calculation
+	plainRows := make([][]string, len(result.Rows))
 	for i, row := range result.Rows {
-		strRows[i] = make([]string, len(row))
+		plainRows[i] = make([]string, len(row))
 		for j, val := range row {
-			strRows[i][j] = formatValue(val)
+			plainRows[i][j] = formatValue(val)
 		}
 	}
 
-	// Calculate column widths
+	// Convert rows to styled strings for display
+	styledRows := make([][]string, len(result.Rows))
+	for i, row := range result.Rows {
+		styledRows[i] = make([]string, len(row))
+		for j, val := range row {
+			styledRows[i][j] = formatValueStyled(val)
+		}
+	}
+
+	// Calculate column widths (using plain text)
 	widths := make([]int, len(result.Columns))
 	for i, col := range result.Columns {
 		widths[i] = utf8.RuneCountInString(col)
 	}
-	for _, row := range strRows {
+	for _, row := range plainRows {
 		for i, val := range row {
 			if i < len(widths) {
 				w := utf8.RuneCountInString(val)
@@ -316,14 +329,14 @@ func (f *Formatter) writeMarkdown(result *executor.QueryResult) error {
 	}
 	fmt.Fprintln(f.writer, sep.String())
 
-	// Print data rows
-	for _, row := range strRows {
+	// Print data rows (using styled values)
+	for _, row := range styledRows {
 		var line strings.Builder
 		line.WriteString("|")
 		for i, val := range row {
 			if i < len(widths) {
 				line.WriteString(" ")
-				line.WriteString(padRight(val, widths[i]))
+				line.WriteString(padRightStyled(val, widths[i]))
 				line.WriteString(" |")
 			}
 		}
@@ -331,18 +344,30 @@ func (f *Formatter) writeMarkdown(result *executor.QueryResult) error {
 	}
 
 	// Row count and timing
-	count := len(result.Rows)
-	if count == 1 {
-		fmt.Fprintf(f.writer, "1 row in set (%s)\n", executor.FormatDuration(result.Duration))
-	} else {
-		fmt.Fprintf(f.writer, "%d rows in set (%s)\n", count, executor.FormatDuration(result.Duration))
-	}
+	fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
+		ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset,
+		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
 
 	return nil
 }
 
+// ANSI color constants for styled output.
+const (
+	ansiReset   = "\033[0m"
+	ansiBold    = "\033[1m"
+	ansiDim     = "\033[2m"
+	ansiItalic  = "\033[3m"
+	ansiRed     = "\033[31m"
+	ansiGreen   = "\033[32m"
+	ansiYellow  = "\033[33m"
+	ansiCyan    = "\033[36m"
+	ansiDimFg   = "\033[90m" // bright black / gray
+)
+
 // Helper functions
 
+// formatValue returns the plain text representation of a value (no ANSI codes).
+// Used for width calculation.
 func formatValue(v interface{}) string {
 	if v == nil {
 		return "NULL"
@@ -355,6 +380,52 @@ func formatValue(v interface{}) string {
 	default:
 		return fmt.Sprintf("%v", val)
 	}
+}
+
+// formatValueStyled returns the styled representation of a value (with ANSI codes).
+// NULL values are rendered in dim italic for visual distinction.
+func formatValueStyled(v interface{}) string {
+	if v == nil {
+		return ansiDim + ansiItalic + "NULL" + ansiReset
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case []byte:
+		return string(val)
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
+// stripANSI removes ANSI escape sequences from a string.
+func stripANSI(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\033' && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && s[j] != 'm' {
+				j++
+			}
+			if j < len(s) {
+				i = j + 1
+				continue
+			}
+		}
+		result.WriteByte(s[i])
+		i++
+	}
+	return result.String()
+}
+
+// padRightStyled pads a potentially ANSI-styled string to the given display width.
+func padRightStyled(s string, width int) string {
+	visibleWidth := utf8.RuneCountInString(stripANSI(s))
+	if visibleWidth >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-visibleWidth)
 }
 
 func convertForJSON(v interface{}) interface{} {
@@ -421,7 +492,20 @@ func CalcTableWidth(result *executor.QueryResult) int {
 
 func formatDMLResult(result *executor.QueryResult) string {
 	if result.AffectedRows >= 0 {
-		return fmt.Sprintf("Query OK, %d rows affected (%s)", result.AffectedRows, executor.FormatDuration(result.Duration))
+		return fmt.Sprintf("%sQuery OK%s, %s%d rows affected%s %s(%s)%s",
+			ansiGreen+ansiBold, ansiReset,
+			ansiGreen, result.AffectedRows, ansiReset,
+			ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
 	}
-	return fmt.Sprintf("Query OK (%s)", executor.FormatDuration(result.Duration))
+	return fmt.Sprintf("%sQuery OK%s %s(%s)%s",
+		ansiGreen+ansiBold, ansiReset,
+		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+}
+
+// pluralRow returns "row" or "rows" based on count.
+func pluralRow(count int) string {
+	if count == 1 {
+		return "row"
+	}
+	return "rows"
 }

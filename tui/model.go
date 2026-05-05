@@ -77,6 +77,16 @@ type Model struct {
 	searchResults    []string // filtered history entries matching query
 	searchResultIdx  int      // current index in searchResults
 
+	// Async execution state
+	execStart     time.Time // when the current query started executing
+	spinnerFrame  int       // current frame index of the spinner animation
+
+	// Pagination state
+	pagedResult *executor.QueryResult // result being paginated (nil = not paginating)
+	pagedFormat output.Format         // format for paged result
+	pagedPage   int                   // current page number (0-based)
+	pagedTotal  int                   // total pages
+
 	// Styles
 	promptStyle lipgloss.Style
 	outputStyle lipgloss.Style
@@ -128,6 +138,20 @@ func blinkCmd() tea.Cmd {
 // tickMsg is sent after a query execution completes.
 type tickMsg time.Time
 
+// execResultMsg is sent when an async query execution completes.
+type execResultMsg struct {
+	input          string
+	formatOverride output.Format
+	result         *executor.QueryResult
+	err            error
+}
+
+// execTickMsg is sent periodically during query execution to update the timer/spinner.
+type execTickMsg time.Time
+
+// spinnerFrames holds the braille spinner animation frames.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -148,6 +172,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.executing = false
+		return m, nil
+
+	case execResultMsg:
+		m.executing = false
+		m.execStart = time.Time{}
+		m.spinnerFrame = 0
+		m.displayQueryResult(msg.result, msg.err, msg.formatOverride)
+		return m, nil
+
+	case execTickMsg:
+		if m.executing {
+			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+			return m, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+				return execTickMsg(t)
+			})
+		}
 		return m, nil
 	}
 
@@ -187,6 +227,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Any key press makes cursor visible and resets blink
 	m.cursorOn = true
 
+	// If in pagination mode, route keys to pagination handler
+	if m.pagedResult != nil {
+		return m.handlePagedKey(msg)
+	}
+
 	// If in history search mode, route keys to search handler
 	if m.historySearch {
 		return m.handleHistorySearchKey(msg)
@@ -197,6 +242,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.executing {
 			m.deps.Executor.Cancel()
 			m.executing = false
+			m.execStart = time.Time{}
+			m.spinnerFrame = 0
 			m.addOutput("Query cancelled")
 			return m, nil
 		}
@@ -776,7 +823,7 @@ func (m Model) execSourceFile(filePath string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// executeInput runs the SQL statement and displays the result.
+// executeInput runs the SQL statement asynchronously and displays the result.
 // formatOverride specifies a per-query output format (FormatTable = use global default).
 func (m Model) executeInput(input string, formatOverride output.Format) (tea.Model, tea.Cmd) {
 	// Remove trailing semicolons
@@ -803,18 +850,31 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 	m.addOutput(m.prompt + displayEntry)
 
 	// Normalize table name casing in SQL before execution
-	execSQL := m.normalizeTableNames(input+";")
+	execSQL := m.normalizeTableNames(input + ";")
 
 	m.executing = true
+	m.execStart = time.Now()
+	m.ed.Clear()
 
-	// Execute
-	ctx := context.Background()
-	result, err := m.deps.Executor.Execute(ctx, execSQL)
+	// Execute asynchronously and start timer tick
+	return m, tea.Batch(
+		func() tea.Msg {
+			result, err := m.deps.Executor.Execute(context.Background(), execSQL)
+			return execResultMsg{input, formatOverride, result, err}
+		},
+		tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+			return execTickMsg(t)
+		}),
+	)
+}
+
+// displayQueryResult handles formatting and displaying a completed query result.
+func (m *Model) displayQueryResult(result *executor.QueryResult, err error, formatOverride output.Format) {
+	m.ed.Clear()
+
 	if err != nil {
 		m.addOutput(fmt.Sprintf("%s", err))
-		m.executing = false
-		m.ed.Clear()
-		return m, nil
+		return
 	}
 
 	// Choose format: use override if specified, else auto-vertical or global default
@@ -827,6 +887,14 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 		}
 	}
 
+	// Check if pagination is needed
+	pageSize := m.deps.Config.UI.PageSize
+	if result.IsQuery && pageSize > 0 && len(result.Rows) > pageSize {
+		m.enterPagination(result, outFmt)
+		m.addOutput(m.renderPagedResult())
+		return
+	}
+
 	// Format and display result
 	var buf strings.Builder
 	formatter := output.NewFormatter(outFmt, &buf)
@@ -836,11 +904,120 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 	if buf.Len() > 0 {
 		m.addOutput(strings.TrimRight(buf.String(), "\n"))
 	}
+}
 
-	m.executing = false
-	m.ed.Clear()
+// enterPagination starts pagination mode for a large result set.
+func (m *Model) enterPagination(result *executor.QueryResult, format output.Format) {
+	pageSize := m.deps.Config.UI.PageSize
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	totalRows := len(result.Rows)
+	totalPages := (totalRows + pageSize - 1) / pageSize
+	if totalPages <= 1 {
+		return // no pagination needed
+	}
+	m.pagedResult = result
+	m.pagedFormat = format
+	m.pagedPage = 0
+	m.pagedTotal = totalPages
+}
 
+// renderPagedResult renders the current page of the paged result.
+func (m *Model) renderPagedResult() string {
+	pageSize := m.deps.Config.UI.PageSize
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	result := m.pagedResult
+	startRow := m.pagedPage * pageSize
+	endRow := startRow + pageSize
+	if endRow > len(result.Rows) {
+		endRow = len(result.Rows)
+	}
+
+	// Create a partial result with only the current page's rows
+	partial := &executor.QueryResult{
+		Columns:  result.Columns,
+		Rows:     result.Rows[startRow:endRow],
+		Duration: result.Duration,
+		IsQuery:  true,
+	}
+
+	var buf strings.Builder
+	formatter := output.NewFormatter(m.pagedFormat, &buf)
+	formatter.WriteResult(partial)
+
+	// Append pager prompt with ANSI styling
+	prompt := fmt.Sprintf("\033[1;33m-- More (page %d/%d, Space=next, q=show all) --\033[0m",
+		m.pagedPage+1, m.pagedTotal)
+	return strings.TrimRight(buf.String(), "\n") + "\n" + prompt
+}
+
+// handlePagedKey handles key events while in pagination mode.
+func (m Model) handlePagedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter, tea.KeySpace, tea.KeyDown, tea.KeyPgDown:
+		if m.pagedPage < m.pagedTotal-1 {
+			// Remove previous page output and prompt (last rendered page lines + prompt)
+			m.removeLastPagedOutput()
+			m.pagedPage++
+			m.addOutput(m.renderPagedResult())
+		} else {
+			m.exitPagination(true)
+		}
+	case tea.KeyUp, tea.KeyPgUp:
+		if m.pagedPage > 0 {
+			m.removeLastPagedOutput()
+			m.pagedPage--
+			m.addOutput(m.renderPagedResult())
+		}
+	case tea.KeyEscape:
+		m.exitPagination(false)
+	default:
+		if msg.Type == tea.KeyRunes {
+			switch string(msg.Runes) {
+			case "q":
+				m.exitPagination(false)
+			case "a":
+				m.exitPagination(true)
+			default:
+				// Ignore other keys in pagination mode
+			}
+		}
+	}
 	return m, nil
+}
+
+// exitPagination exits pagination mode, optionally showing all remaining rows.
+func (m *Model) exitPagination(showAll bool) {
+	if showAll && m.pagedResult != nil {
+		// Remove the last paged page and show full result
+		m.removeLastPagedOutput()
+		var buf strings.Builder
+		formatter := output.NewFormatter(m.pagedFormat, &buf)
+		formatter.WriteResult(m.pagedResult)
+		m.addOutput(strings.TrimRight(buf.String(), "\n"))
+	}
+	m.pagedResult = nil
+	m.pagedFormat = output.FormatTable
+	m.pagedPage = 0
+	m.pagedTotal = 0
+}
+
+// removeLastPagedOutput removes the lines from the last rendered paged result
+// from the output buffer. It removes lines until it finds the pager prompt marker.
+func (m *Model) removeLastPagedOutput() {
+	// Remove lines from the end until we've removed the pager prompt line
+	// The pager prompt contains "-- More --"
+	for len(m.output) > 0 {
+		lastIdx := len(m.output) - 1
+		lastLine := m.output[lastIdx]
+		m.output = m.output[:lastIdx]
+		if strings.Contains(lastLine, "-- More") {
+			break
+		}
+	}
 }
 
 // normalizeTableNames replaces table name identifiers in SQL with the correct
@@ -1003,7 +1180,16 @@ func (m Model) View() string {
 	}
 
 	// Prompt line
-	if m.historySearch {
+	if m.executing {
+		// Show spinner + elapsed timer while query is running
+		elapsed := time.Since(m.execStart)
+		spinner := spinnerFrames[m.spinnerFrame]
+		spinnerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)
+		timerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+		sb.WriteString(spinnerStyle.Render(spinner))
+		sb.WriteString(" ")
+		sb.WriteString(timerStyle.Render(fmt.Sprintf("Executing... (%s)", executor.FormatDuration(elapsed))))
+	} else if m.historySearch {
 		// Render Ctrl+R search prompt
 		searchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
 		queryStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
