@@ -54,15 +54,17 @@ func (f Format) String() string {
 
 // Formatter formats and writes query results.
 type Formatter struct {
-	format Format
-	writer io.Writer
+	format     Format
+	writer     io.Writer
+	showTiming bool // whether to include execution time in output
 }
 
 // NewFormatter creates a new Formatter with the given format and writer.
 func NewFormatter(format Format, writer io.Writer) *Formatter {
 	return &Formatter{
-		format: format,
-		writer: writer,
+		format:     format,
+		writer:     writer,
+		showTiming: true, // default: show timing
 	}
 }
 
@@ -74,6 +76,16 @@ func (f *Formatter) SetFormat(format Format) {
 // CurrentFormat returns the current output format.
 func (f *Formatter) CurrentFormat() Format {
 	return f.format
+}
+
+// SetShowTiming controls whether execution time is displayed.
+func (f *Formatter) SetShowTiming(show bool) {
+	f.showTiming = show
+}
+
+// ShowTiming returns whether execution time display is enabled.
+func (f *Formatter) ShowTiming() bool {
+	return f.showTiming
 }
 
 // WriteResult writes a QueryResult to the underlying writer using the current format.
@@ -96,7 +108,7 @@ func (f *Formatter) WriteResult(result *executor.QueryResult) error {
 
 	// Handle DML/DDL results
 	if !result.IsQuery {
-		msg := formatDMLResult(result)
+		msg := f.formatDMLResult(result)
 		_, err := fmt.Fprintln(f.writer, msg)
 		return err
 	}
@@ -195,9 +207,14 @@ func (f *Formatter) writeTable(result *executor.QueryResult) error {
 	}
 
 	// Row count and timing
-	fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
-		ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset,
-		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+	if f.showTiming {
+		fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
+			ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset,
+			ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+	} else {
+		fmt.Fprintf(f.writer, "%s%d %s in set%s\n",
+			ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset)
+	}
 
 	return nil
 }
@@ -233,9 +250,14 @@ func (f *Formatter) writeVertical(result *executor.QueryResult) error {
 		}
 	}
 
-	fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
-		ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset,
-		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+	if f.showTiming {
+		fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
+			ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset,
+			ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+	} else {
+		fmt.Fprintf(f.writer, "%s%d %s in set%s\n",
+			ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset)
+	}
 
 	return nil
 }
@@ -267,9 +289,14 @@ func (f *Formatter) writeJSON(result *executor.QueryResult) error {
 	}
 
 	count := len(result.Rows)
-	fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
-		ansiGreen, count, pluralRow(count), ansiReset,
-		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+	if f.showTiming {
+		fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
+			ansiGreen, count, pluralRow(count), ansiReset,
+			ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+	} else {
+		fmt.Fprintf(f.writer, "%s%d %s in set%s\n",
+			ansiGreen, count, pluralRow(count), ansiReset)
+	}
 
 	return nil
 }
@@ -349,9 +376,14 @@ func (f *Formatter) writeMarkdown(result *executor.QueryResult) error {
 	}
 
 	// Row count and timing
-	fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
-		ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset,
-		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+	if f.showTiming {
+		fmt.Fprintf(f.writer, "%s%d %s in set%s %s(%s)%s\n",
+			ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset,
+			ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+	} else {
+		fmt.Fprintf(f.writer, "%s%d %s in set%s\n",
+			ansiGreen, len(result.Rows), pluralRow(len(result.Rows)), ansiReset)
+	}
 
 	return nil
 }
@@ -385,6 +417,12 @@ func formatValue(v interface{}) string {
 	default:
 		return fmt.Sprintf("%v", val)
 	}
+}
+
+// FormatValuePlain returns the plain text representation of a value (no ANSI codes).
+// Exported for use by other packages (e.g., pipe output).
+func FormatValuePlain(v interface{}) string {
+	return formatValue(v)
 }
 
 // formatValueStyled returns the styled representation of a value (with ANSI codes).
@@ -495,16 +533,25 @@ func CalcTableWidth(result *executor.QueryResult) int {
 	return total
 }
 
-func formatDMLResult(result *executor.QueryResult) string {
+func (f *Formatter) formatDMLResult(result *executor.QueryResult) string {
 	if result.AffectedRows >= 0 {
-		return fmt.Sprintf("%sQuery OK%s, %s%d rows affected%s %s(%s)%s",
+		if f.showTiming {
+			return fmt.Sprintf("%sQuery OK%s, %s%d rows affected%s %s(%s)%s",
+				ansiGreen+ansiBold, ansiReset,
+				ansiGreen, result.AffectedRows, ansiReset,
+				ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+		}
+		return fmt.Sprintf("%sQuery OK%s, %s%d rows affected%s",
 			ansiGreen+ansiBold, ansiReset,
-			ansiGreen, result.AffectedRows, ansiReset,
+			ansiGreen, result.AffectedRows, ansiReset)
+	}
+	if f.showTiming {
+		return fmt.Sprintf("%sQuery OK%s %s(%s)%s",
+			ansiGreen+ansiBold, ansiReset,
 			ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
 	}
-	return fmt.Sprintf("%sQuery OK%s %s(%s)%s",
-		ansiGreen+ansiBold, ansiReset,
-		ansiCyan, executor.FormatDuration(result.Duration), ansiReset)
+	return fmt.Sprintf("%sQuery OK%s",
+		ansiGreen+ansiBold, ansiReset)
 }
 
 // pluralRow returns "row" or "rows" based on count.

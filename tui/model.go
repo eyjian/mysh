@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -104,6 +106,9 @@ type Model struct {
 	pagedFormat output.Format         // format for paged result
 	pagedPage   int                   // current page number (0-based)
 	pagedTotal  int                   // total pages
+
+	// Timing display
+	showTiming bool // true = display query execution time
 
 	// Styles
 	promptStyle lipgloss.Style
@@ -951,6 +956,27 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case "\\edit", "\\e":
+		return m.handleEdit()
+
+	case "\\pipe", "\\|":
+		if len(parts) < 2 {
+			m.addOutput("Usage: \\pipe <command> [args...]")
+			m.addOutput("  Pipes the last query result to a system command.")
+			m.addOutput("  Example: \\pipe grep pattern")
+		} else {
+			m.handlePipe(parts[1:])
+		}
+
+	case "\\timing":
+		m.showTiming = !m.showTiming
+		m.deps.Formatter.SetShowTiming(m.showTiming)
+		if m.showTiming {
+			m.addOutput("Timing is on.")
+		} else {
+			m.addOutput("Timing is off.")
+		}
+
 	default:
 		m.addOutput(fmt.Sprintf("Unknown command: %s. Type \\help for available commands.", command))
 	}
@@ -1132,6 +1158,7 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 	// Format and display result
 	var buf strings.Builder
 	formatter := output.NewFormatter(outFmt, &buf)
+	formatter.SetShowTiming(m.showTiming)
 	if writeErr := formatter.WriteResult(result); writeErr != nil {
 		m.addOutput(fmt.Sprintf("Output error: %s", writeErr))
 	}
@@ -1257,6 +1284,115 @@ func (m *Model) removeLastPagedOutput() {
 		if strings.Contains(lastLine, "-- More") {
 			break
 		}
+	}
+}
+
+// handleEdit opens the user's editor ($EDITOR or vi) with the current input buffer
+// or the last executed query. After the editor closes, the content is executed as SQL.
+func (m Model) handleEdit() (tea.Model, tea.Cmd) {
+	// Determine initial content: current input, or last query
+	content := m.ed.Text()
+	if strings.TrimSpace(content) == "" && m.lastQuery != "" {
+		content = m.lastQuery
+	}
+
+	// Write content to a temp file
+	tmpFile, err := os.CreateTemp("", "mysh-edit-*.sql")
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: Failed to create temp file: %s", err))
+		return m, nil
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmpFile.WriteString(content); err != nil {
+		tmpFile.Close()
+		m.addOutput(fmt.Sprintf("ERROR: Failed to write temp file: %s", err))
+		return m, nil
+	}
+	tmpFile.Close()
+
+	// Determine editor
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+
+	// Suspend the TUI, run the editor, then resume
+	tea.ExitAltScreen()
+	defer tea.EnterAltScreen()
+
+	cmd := exec.Command(editor, tmpPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: Editor failed: %s", err))
+		return m, nil
+	}
+
+	// Read back the edited content
+	edited, err := os.ReadFile(tmpPath)
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: Failed to read temp file: %s", err))
+		return m, nil
+	}
+
+	sql := strings.TrimSpace(string(edited))
+	if sql == "" {
+		m.addOutput("Empty content, nothing to execute.")
+		m.ed.Clear()
+		return m, nil
+	}
+
+	// Clear the input line and execute the edited SQL
+	m.ed.Clear()
+	m.multiline = false
+	m.addOutput(m.prompt + sql)
+	return m.executeInput(sql, output.FormatTable)
+}
+
+// handlePipe pipes the last query result to a system command.
+func (m *Model) handlePipe(cmdParts []string) {
+	if m.lastResult == nil || !m.lastResult.IsQuery {
+		m.addOutput("No query result to pipe. Execute a SELECT query first.")
+		return
+	}
+
+	// Format the result as tab-separated plain text (no ANSI codes) for piping
+	var buf strings.Builder
+	// Header
+	buf.WriteString(strings.Join(m.lastResult.Columns, "\t"))
+	buf.WriteString("\n")
+	// Rows
+	for _, row := range m.lastResult.Rows {
+		vals := make([]string, len(row))
+		for i, val := range row {
+			vals[i] = output.FormatValuePlain(val)
+		}
+		buf.WriteString(strings.Join(vals, "\t"))
+		buf.WriteString("\n")
+	}
+
+	// Execute the system command with piped input
+	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+	cmd.Stdin = strings.NewReader(buf.String())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: Command failed: %s\n%s", err, stderr.String()))
+		return
+	}
+
+	out := strings.TrimRight(stdout.String(), "\n")
+	if out != "" {
+		m.addOutput(out)
 	}
 }
 
@@ -1918,6 +2054,9 @@ Backslash commands:
   \connect <dsn>    Connect to a database (user@host:port/db or just db)
   \reconnect        Reconnect to the current server
   \source <file>    Execute SQL from file
+  \edit, \e         Open editor ($EDITOR or vi) to edit/execute SQL
+  \pipe, \| <cmd>   Pipe last query result to a system command
+  \timing           Toggle query execution time display
   \mouse            Toggle mouse mode (scroll wheel vs text selection)
   \export <f> [fmt] Export last result to file (csv/json/markdown)
   \watch [sec] [SQL] Watch query at intervals (default 5s, Ctrl+C stop)

@@ -12,10 +12,14 @@ An enhanced MySQL command-line client that provides real-time SQL syntax highlig
 - **Smart Auto-Completion** — Context-aware suggestions for keywords, table names, column names, and database names
 - **SQL Snippets** — Built-in templates for CREATE TABLE, ALTER, INSERT, etc., auto-expand on Tab
 - **Interactive Editor** — Multi-line editing with cursor movement, history navigation, and selection
+- **External Editor** — Open `$EDITOR` (vim/vi) to edit SQL with `\edit`, auto-execute on save
 - **Command History** — Persistent history with search (`Ctrl+R`), navigation (Up/Down), and deduplication
 - **Multiple Output Formats** — Table (default), vertical (`\G`), JSON (`\j`), and Markdown (`\m`) result formatting
 - **Result Export** — Export query results to CSV, JSON, or Markdown files via `\export`
+- **Pipe to Commands** — Pipe query results to system commands via `\pipe` (e.g., `\pipe grep pattern`)
 - **Live Watch** — Periodically re-execute queries with `\watch` for real-time monitoring
+- **Query Timing** — Toggle execution time display with `\timing`
+- **NULL Display** — NULL values rendered in dim italic for clear visual distinction
 - **SQL Aliases** — Define shortcuts for frequently used queries in config or interactively
 - **Session Management** — Save, switch, and delete database connection profiles via `\session`
 - **Schema Metadata Cache** — Auto-cached table/column info with lazy refresh after DDL statements
@@ -259,6 +263,9 @@ Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syn
 | `\format table\|vertical\|json\|markdown` | Change output format |
 | `\history [pattern]` | Search command history |
 | `\source <file>` | Execute SQL from file |
+| `\edit`, `\e` | Open external editor to edit/execute SQL |
+| `\pipe`, `\| <cmd>` | Pipe last query result to a system command |
+| `\timing` | Toggle query execution time display |
 | `\export <file> [csv\|json\|markdown]` | Export last query result to file |
 | `\watch [seconds] [SQL]` | Re-execute query at intervals (default 5s) |
 | `\alias [name sql]` | Show/set command aliases |
