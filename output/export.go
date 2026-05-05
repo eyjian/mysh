@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"mysh/executor"
+	"github.com/eyjian/mysh/executor"
 )
 
 // ExportFormat represents the file format for exporting query results.

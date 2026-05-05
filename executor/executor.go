@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"mysh/connection"
-	"mysh/metadata"
+	"github.com/eyjian/mysh/connection"
+	"github.com/eyjian/mysh/metadata"
 )
 
 // QueryResult holds the result of a SQL query execution.

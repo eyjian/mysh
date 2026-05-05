@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"mysh/executor"
+	"github.com/eyjian/mysh/executor"
 )
 
 func TestParseFormat(t *testing.T) {

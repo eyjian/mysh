@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"mysh/config"
+	"github.com/eyjian/mysh/config"
 )
 
 func TestContextAnalyzerStatementStart(t *testing.T) {

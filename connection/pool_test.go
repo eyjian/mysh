@@ -3,7 +3,7 @@ package connection
 import (
 	"testing"
 
-	"mysh/config"
+	"github.com/eyjian/mysh/config"
 )
 
 // --- New with nil config ---

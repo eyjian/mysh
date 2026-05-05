@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"mysh/config"
+	"github.com/eyjian/mysh/config"
 )
 
 func TestNewHighlighter(t *testing.T) {

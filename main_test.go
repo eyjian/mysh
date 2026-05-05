@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"mysh/tui"
+	"github.com/eyjian/mysh/tui"
 )
 
 func TestParseArgs_Host(t *testing.T) {

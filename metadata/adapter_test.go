@@ -3,7 +3,7 @@ package metadata
 import (
 	"testing"
 
-	"mysh/completer"
+	"github.com/eyjian/mysh/completer"
 )
 
 // ---- CacheAdapter construction ----

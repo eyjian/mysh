@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"mysh/completer"
-	"mysh/config"
-	"mysh/editor"
-	"mysh/history"
-	"mysh/output"
+	"github.com/eyjian/mysh/completer"
+	"github.com/eyjian/mysh/config"
+	"github.com/eyjian/mysh/editor"
+	"github.com/eyjian/mysh/history"
+	"github.com/eyjian/mysh/output"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"

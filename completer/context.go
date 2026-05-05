@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode"
 
-	"mysh/highlight"
+	"github.com/eyjian/mysh/highlight"
 )
 
 // ContextType represents the type of completion context at the cursor position.

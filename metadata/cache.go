@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"mysh/connection"
+	"github.com/eyjian/mysh/connection"
 )
 
 // ColumnInfo holds metadata about a database column.

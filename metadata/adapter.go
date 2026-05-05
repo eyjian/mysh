@@ -1,6 +1,6 @@
 package metadata
 
-import "mysh/completer"
+import "github.com/eyjian/mysh/completer"
 
 // CacheAdapter wraps a Cache to satisfy the completer.MetadataCache interface.
 // Usage: completerInstance.SetMetadata(metadata.NewCacheAdapter(cache))

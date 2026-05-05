@@ -1,4 +1,4 @@
-module mysh
+module github.com/eyjian/mysh
 
 go 1.25.6
 

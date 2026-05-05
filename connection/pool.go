@@ -8,7 +8,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"mysh/config"
+	"github.com/eyjian/mysh/config"
 )
 
 // Pool manages MySQL database connections.

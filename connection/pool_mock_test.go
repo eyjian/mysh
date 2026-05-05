@@ -8,7 +8,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
-	"mysh/config"
+	"github.com/eyjian/mysh/config"
 )
 
 // newMockPool creates a Pool backed by sqlmock with ping monitoring enabled.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"mysh/executor"
+	"github.com/eyjian/mysh/executor"
 )
 
 // Format represents the output format type.

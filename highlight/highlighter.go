@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"mysh/config"
+	"github.com/eyjian/mysh/config"
 )
 
 // styleMap maps token types to lipgloss-compatible style strings.

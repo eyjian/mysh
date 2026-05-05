@@ -6,8 +6,8 @@ import (
 	"strings"
 	"unicode"
 
-	"mysh/config"
-	"mysh/highlight"
+	"github.com/eyjian/mysh/config"
+	"github.com/eyjian/mysh/highlight"
 )
 
 // SuggestionType represents the type of a completion suggestion.

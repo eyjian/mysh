@@ -11,15 +11,15 @@ import (
 
 	"golang.org/x/term"
 
-	"mysh/completer"
-	"mysh/config"
-	"mysh/connection"
-	"mysh/executor"
-	"mysh/highlight"
-	"mysh/history"
-	"mysh/metadata"
-	"mysh/output"
-	"mysh/tui"
+	"github.com/eyjian/mysh/completer"
+	"github.com/eyjian/mysh/config"
+	"github.com/eyjian/mysh/connection"
+	"github.com/eyjian/mysh/executor"
+	"github.com/eyjian/mysh/highlight"
+	"github.com/eyjian/mysh/history"
+	"github.com/eyjian/mysh/metadata"
+	"github.com/eyjian/mysh/output"
+	"github.com/eyjian/mysh/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
