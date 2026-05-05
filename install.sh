@@ -43,14 +43,32 @@ detect_arch() {
     esac
 }
 
-# Get latest version from GitHub API
+# Get latest version from GitHub release redirect
 get_latest_version() {
+    # Method 1: Follow the /releases/latest redirect URL (most reliable)
     local version
-    # Use GitHub API with Accept header to get clean JSON
+    version=$(curl -sIL "${GITHUB_BASE}/releases/latest" 2>&1 \
+        | grep -i "location:" \
+        | tail -1 \
+        | sed 's/.*tag\///' \
+        | tr -d '\r\n ' || true)
+
+    if [ -n "$version" ]; then
+        echo "$version"
+        return
+    fi
+
+    # Method 2: GitHub API
     version=$(curl -sfL -H "Accept: application/vnd.github+json" \
         "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-        | grep '"tag_name"' | head -1 | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/' || true)
-    echo "${version:-latest}"
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])" 2>/dev/null || true)
+
+    if [ -n "$version" ]; then
+        echo "$version"
+        return
+    fi
+
+    echo "latest"
 }
 
 # Download binary from GitHub Releases
@@ -66,7 +84,6 @@ download_binary() {
     local url="${GITHUB_BASE}/releases/download/${version}/${filename}"
 
     info "Downloading mysh ${version} for ${os}/${arch}..."
-    info "URL: ${url}"
     local tmp_file
     tmp_file=$(mktemp)
 
@@ -79,18 +96,9 @@ download_binary() {
         return 1
     fi
 
-    # Verify it's a real binary (not an HTML error page)
-    local file_type
-    file_type=$(file "$tmp_file" 2>/dev/null || echo "unknown")
-    if echo "$file_type" | grep -qi "html\|text"; then
-        rm -f "$tmp_file"
-        warn "Downloaded file is not a valid binary (got HTML/text)"
-        return 1
-    fi
-
-    # Verify file size (> 1MB expected)
+    # Verify file size (> 1MB expected for a real binary)
     local file_size
-    file_size=$(stat -f%z "$tmp_file" 2>/dev/null || stat -c%s "$tmp_file" 2>/dev/null || echo "0")
+    file_size=$(wc -c < "$tmp_file" 2>/dev/null | tr -d ' ' || echo "0")
     if [ "$file_size" -lt 1048576 ]; then
         rm -f "$tmp_file"
         warn "Downloaded file is too small (${file_size} bytes), likely not a valid binary"
@@ -108,7 +116,9 @@ go_install() {
     fi
 
     info "Running: go install github.com/${REPO}@latest"
-    go install "github.com/${REPO}@latest"
+    if ! go install "github.com/${REPO}@latest"; then
+        error "go install failed. Try downloading the binary manually from ${GITHUB_BASE}/releases"
+    fi
 
     local go_bin
     go_bin="$(go env GOPATH)/bin/mysh"
