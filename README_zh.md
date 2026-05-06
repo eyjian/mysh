@@ -20,6 +20,7 @@
 - **NULL 值区分** — NULL 值以灰色斜体显示，与空字符串明确区分
 - **SQL 别名** — 在配置文件中或交互式定义常用查询的快捷方式
 - **会话管理** — 通过 `\session` 保存、切换和删除数据库连接配置
+- **事务支持** — 支持 BEGIN/COMMIT/ROLLBACK 显式事务，专用连接绑定，`tx>` 提示符指示，退出自动回滚
 - **Schema 元数据缓存** — 自动缓存表/列信息，DDL 语句后延迟刷新
 - **可配置主题** — 通过 `~/.mysh.yaml` 自定义配色方案
 - **零运行时依赖** — 单个静态二进制文件，无需 CGO
@@ -113,6 +114,23 @@ mysh> SELECT id, name
     -> FROM users
     -> WHERE age > 18;
 ```
+
+### 事务支持
+
+mysh 支持显式事务，事务期间使用专用连接绑定：
+
+```sql
+mysh> BEGIN;
+tx> INSERT INTO orders (user_id, amount) VALUES (1, 99.9);
+tx> INSERT INTO order_items (order_id, product_id) VALUES (LAST_INSERT_ID(), 42);
+tx> COMMIT;
+mysh>
+```
+
+- 执行 `BEGIN` 后，提示符变为 `tx>`，表示事务正在进行
+- 事务内的所有语句在同一个专用连接上执行，确保事务一致性
+- 使用 `\rollback` 或 `ROLLBACK` 回滚事务
+- 退出时（`\q`、`Ctrl+D`、`Ctrl+C`）如有未提交事务，自动回滚
 
 ### 快捷键
 
@@ -299,6 +317,7 @@ sessions:
 | `\mouse` | 切换鼠标模式 |
 | `\cd [dir]` | 切换/查看工作目录（用于 \source、\sys） |
 | `\sys`, `\! <cmd>` | 执行系统命令 |
+| `\rollback` | 回滚当前事务 |
 
 ### 格式后缀
 

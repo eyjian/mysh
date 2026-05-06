@@ -23,6 +23,7 @@ An enhanced MySQL command-line client that provides real-time SQL syntax highlig
 - **SQL Aliases** — Define shortcuts for frequently used queries in config or interactively
 - **Session Management** — Save, switch, and delete database connection profiles via `\session`
 - **Favorite Queries** — Bookmark SQL queries with `\fav`, list/run/delete interactively
+- **Transaction Support** — Explicit BEGIN/COMMIT/ROLLBACK with dedicated connection binding, `tx>` prompt indicator, and auto-rollback on exit
 - **SSH Tunnel** — Connect to remote MySQL through an SSH jump host via local port forwarding
 - **Schema Metadata Cache** — Auto-cached table/column info with lazy refresh after DDL statements
 - **Configurable Themes** — Customizable color schemes via `~/.mysh.yaml`
@@ -122,6 +123,23 @@ mysh> SELECT id, name
     -> FROM users
     -> WHERE age > 18;
 ```
+
+### Transaction Support
+
+mysh supports explicit transactions with dedicated connection binding:
+
+```sql
+mysh> BEGIN;
+tx> INSERT INTO orders (user_id, amount) VALUES (1, 99.9);
+tx> INSERT INTO order_items (order_id, product_id) VALUES (LAST_INSERT_ID(), 42);
+tx> COMMIT;
+mysh>
+```
+
+- After `BEGIN`, the prompt changes to `tx>` indicating an active transaction
+- All statements within the transaction are executed on the same dedicated connection
+- Use `\rollback` or `ROLLBACK` to abort and discard changes
+- Auto-rollback on exit (`\q`, `Ctrl+D`, `Ctrl+C`) if a transaction is still open
 
 ### Key Bindings
 
@@ -351,6 +369,7 @@ Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syn
 | `\mouse` | Toggle mouse mode |
 | `\cd [dir]` | Change/show working directory (for \source, \sys) |
 | `\sys`, `\! <cmd>` | Execute a system command |
+| `\rollback` | Rollback current transaction |
 
 ### Format Suffixes
 
