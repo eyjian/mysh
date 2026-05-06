@@ -838,6 +838,11 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	command := parts[0]
 
+	// Strip trailing semicolons from all arguments (users may type \use mydb; out of habit)
+	for i := 1; i < len(parts); i++ {
+		parts[i] = strings.TrimRight(parts[i], ";")
+	}
+
 	switch command {
 	case "\\quit", "\\q":
 		m.rollbackIfInTransaction()
@@ -2437,7 +2442,7 @@ func (m *Model) handleDesc(parts []string) {
 		return
 	}
 
-	tableName := parts[0]
+	tableName := strings.TrimRight(parts[0], ";")
 	mode := "columns"
 	if len(parts) >= 2 {
 		mode = strings.ToLower(parts[1])
