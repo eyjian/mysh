@@ -40,6 +40,8 @@ type Executor struct {
 	cancel         context.CancelFunc
 	safeUpdates    bool          // when true, block UPDATE/DELETE without WHERE/LIMIT
 	slowThreshold  time.Duration // queries slower than this are flagged (0 = disabled)
+	txConn         *sql.Conn     // dedicated connection for transaction mode (nil when not in tx)
+	inTransaction  bool          // true when inside a BEGIN..COMMIT/ROLLBACK block
 }
 
 // New creates a new SQL executor.
@@ -74,12 +76,28 @@ func (e *Executor) SlowThreshold() time.Duration {
 
 // Execute runs a single SQL statement and returns the result.
 // If a connection error occurs, it attempts to reconnect and retry once.
+// It also detects BEGIN/COMMIT/ROLLBACK to manage transaction mode.
 func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, error) {
 	// Check safe-updates before execution
 	if e.safeUpdates {
 		if err := e.checkSafeUpdates(query); err != nil {
 			return nil, err
 		}
+	}
+
+	// Detect transaction control statements
+	upper := strings.ToUpper(strings.TrimSpace(query))
+	upper = stripComments(upper)
+	upper = strings.TrimSuffix(upper, ";")
+
+	if e.isBeginStatement(upper) {
+		return e.beginTransaction(ctx)
+	}
+	if e.isCommitStatement(upper) {
+		return e.commitTransaction(ctx)
+	}
+	if e.isRollbackStatement(upper) {
+		return e.rollbackTransaction(ctx)
 	}
 
 	result, err := e.executeOnce(ctx, query)
@@ -91,7 +109,7 @@ func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, err
 	}
 
 	// Connection error — try to reconnect once
-	if e.pool != nil {
+	if e.pool != nil && !e.inTransaction {
 		if reconnErr := e.pool.Reconnect(); reconnErr != nil {
 			return nil, fmt.Errorf("connection lost and reconnect failed: %w", reconnErr)
 		}
@@ -202,7 +220,13 @@ func (e *Executor) executeOnce(ctx context.Context, query string) (*QueryResult,
 	}
 
 	if isQuery {
-		rows, err := e.pool.Query(query)
+		var rows *sql.Rows
+		var err error
+		if e.inTransaction && e.txConn != nil {
+			rows, err = e.txConn.QueryContext(ctx, query)
+		} else {
+			rows, err = e.pool.Query(query)
+		}
 		if err != nil {
 			result.Error = err
 			result.Duration = time.Since(start)
@@ -250,7 +274,13 @@ func (e *Executor) executeOnce(ctx context.Context, query string) (*QueryResult,
 		result.RowCount = int64(len(result.Rows))
 	} else {
 		// DML/DDL execution
-		res, err := e.pool.Exec(query)
+		var res sql.Result
+		var err error
+		if e.inTransaction && e.txConn != nil {
+			res, err = e.txConn.ExecContext(ctx, query)
+		} else {
+			res, err = e.pool.Exec(query)
+		}
 		if err != nil {
 			result.Error = err
 			result.Duration = time.Since(start)
@@ -311,6 +341,122 @@ func (e *Executor) Cancel() {
 	if e.cancel != nil {
 		e.cancel()
 	}
+}
+
+// InTransaction returns whether the executor is currently in transaction mode.
+func (e *Executor) InTransaction() bool {
+	return e.inTransaction
+}
+
+// RollbackTransaction forces a rollback of the current transaction.
+// This is used by the \rollback command or when exiting while in a transaction.
+func (e *Executor) RollbackTransaction() error {
+	if !e.inTransaction || e.txConn == nil {
+		return nil
+	}
+	_, err := e.txConn.ExecContext(context.Background(), "ROLLBACK")
+	e.releaseTxConn()
+	return err
+}
+
+// beginTransaction starts a transaction by acquiring a dedicated connection.
+func (e *Executor) beginTransaction(ctx context.Context) (*QueryResult, error) {
+	start := time.Now()
+
+	if e.inTransaction {
+		return nil, fmt.Errorf("already in transaction")
+	}
+
+	conn, err := e.pool.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire connection for transaction: %w", err)
+	}
+
+	// Execute BEGIN on the dedicated connection
+	_, err = conn.ExecContext(ctx, "BEGIN")
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	e.txConn = conn
+	e.inTransaction = true
+
+	return &QueryResult{
+		Duration:     time.Since(start),
+		IsQuery:      false,
+		AffectedRows: 0,
+		Warning:      "Transaction started",
+	}, nil
+}
+
+// commitTransaction commits the current transaction and releases the dedicated connection.
+func (e *Executor) commitTransaction(ctx context.Context) (*QueryResult, error) {
+	start := time.Now()
+
+	if !e.inTransaction || e.txConn == nil {
+		return nil, fmt.Errorf("not in transaction")
+	}
+
+	_, err := e.txConn.ExecContext(ctx, "COMMIT")
+	if err != nil {
+		return nil, fmt.Errorf("commit failed: %w", err)
+	}
+
+	e.releaseTxConn()
+
+	return &QueryResult{
+		Duration:     time.Since(start),
+		IsQuery:      false,
+		AffectedRows: 0,
+	}, nil
+}
+
+// rollbackTransaction rolls back the current transaction and releases the dedicated connection.
+func (e *Executor) rollbackTransaction(ctx context.Context) (*QueryResult, error) {
+	start := time.Now()
+
+	if !e.inTransaction || e.txConn == nil {
+		return nil, fmt.Errorf("not in transaction")
+	}
+
+	_, err := e.txConn.ExecContext(ctx, "ROLLBACK")
+	if err != nil {
+		return nil, fmt.Errorf("rollback failed: %w", err)
+	}
+
+	e.releaseTxConn()
+
+	return &QueryResult{
+		Duration:     time.Since(start),
+		IsQuery:      false,
+		AffectedRows: 0,
+	}, nil
+}
+
+// releaseTxConn releases the dedicated transaction connection.
+func (e *Executor) releaseTxConn() {
+	if e.txConn != nil {
+		e.txConn.Close()
+		e.txConn = nil
+	}
+	e.inTransaction = false
+}
+
+// isBeginStatement checks if the SQL starts a transaction.
+func (e *Executor) isBeginStatement(upper string) bool {
+	return upper == "BEGIN" || upper == "START TRANSACTION" ||
+		strings.HasPrefix(upper, "START TRANSACTION ")
+}
+
+// isCommitStatement checks if the SQL commits a transaction.
+func (e *Executor) isCommitStatement(upper string) bool {
+	return upper == "COMMIT"
+}
+
+// isRollbackStatement checks if the SQL rolls back a transaction.
+func (e *Executor) isRollbackStatement(upper string) bool {
+	return upper == "ROLLBACK"
 }
 
 // isQueryStatement determines if the SQL is a query (returns rows).

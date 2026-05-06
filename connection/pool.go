@@ -161,6 +161,13 @@ func (p *Pool) ExecContext(ctx context.Context, query string, args ...interface{
 	return res, err
 }
 
+// Conn returns a single dedicated connection from the pool.
+// The caller is responsible for closing the connection when done.
+// This is used for transaction mode where all statements must run on the same connection.
+func (p *Pool) Conn(ctx context.Context) (*sql.Conn, error) {
+	return p.db.Conn(ctx)
+}
+
 // SetConnTimeout sets the per-query connection timeout.
 func (p *Pool) SetConnTimeout(d time.Duration) {
 	p.connTimeout = d

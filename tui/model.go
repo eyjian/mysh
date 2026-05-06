@@ -372,11 +372,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Empty input + Ctrl-C = quit
+		m.rollbackIfInTransaction()
 		m.quitting = true
 		return m, tea.Quit
 
 	case tea.KeyCtrlD:
 		if m.ed.IsEmpty() {
+			m.rollbackIfInTransaction()
 			m.quitting = true
 			return m, tea.Quit
 		}
@@ -676,6 +678,17 @@ func formatSuffixString(f output.Format) string {
 	}
 }
 
+// rollbackIfInTransaction rolls back any active transaction before exiting.
+func (m *Model) rollbackIfInTransaction() {
+	if m.deps.Executor != nil && m.deps.Executor.InTransaction() {
+		if err := m.deps.Executor.RollbackTransaction(); err != nil {
+			m.addOutput(fmt.Sprintf("Warning: rollback on exit failed: %s", err))
+		} else {
+			m.addOutput("Transaction rolled back on exit.")
+		}
+	}
+}
+
 // highlightDisplayEntry applies syntax highlighting to the SQL portion of a display entry,
 // preserving format suffixes (\G, \j, \m) and semicolons outside the highlighted SQL.
 func (m Model) highlightDisplayEntry(entry string) string {
@@ -774,6 +787,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	if lowerCmd == "quit" || lowerCmd == "exit" {
 		m.addOutput(m.prompt + trimmed)
 		m.ed.Clear()
+		m.rollbackIfInTransaction()
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -826,6 +840,7 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 
 	switch command {
 	case "\\quit", "\\q":
+		m.rollbackIfInTransaction()
 		m.quitting = true
 		return m, tea.Quit
 
@@ -930,6 +945,17 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 			} else {
 				m.addOutput("Reconnected successfully.")
 				m.connected = true
+			}
+		}
+
+	case "\\rollback":
+		if m.deps.Executor == nil || !m.deps.Executor.InTransaction() {
+			m.addOutput("Not in a transaction.")
+		} else {
+			if err := m.deps.Executor.RollbackTransaction(); err != nil {
+				m.addOutput(fmt.Sprintf("Rollback failed: %s", err))
+			} else {
+				m.addOutput("Transaction rolled back.")
 			}
 		}
 
@@ -1777,7 +1803,12 @@ func (m Model) View() string {
 		} else {
 			healthIndicator = "\033[31m●\033[0m " // red dot
 		}
-		currentPrompt := healthIndicator + m.prompt
+		// Transaction indicator
+		txIndicator := ""
+		if m.deps.Executor != nil && m.deps.Executor.InTransaction() {
+			txIndicator = "\033[1;33mtx>\033[0m "
+		}
+		currentPrompt := healthIndicator + txIndicator + m.prompt
 		sb.WriteString(m.promptStyle.Render(currentPrompt))
 
 		input := m.ed.Text()
@@ -2666,6 +2697,7 @@ Backslash commands:
   \history [pat]    Search/show command history
   \connect <dsn>    Connect to a database (user@host:port/db or just db)
   \reconnect        Reconnect to the current server
+  \rollback         Rollback current transaction
   \desc <t> [mode]  Describe table (columns|full|indexes|create)
   \source <file>    Execute SQL from file
   \edit, \e         Open editor ($EDITOR or vi) to edit/execute SQL
