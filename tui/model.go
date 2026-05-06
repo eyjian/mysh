@@ -150,6 +150,7 @@ func NewModel(deps Dependencies) Model {
 		autoVerticalOutput:  deps.AutoVerticalOutput,
 		connected:           true,
 		safeUpdates:         deps.Config.Safety.SafeUpdates,
+		showTiming:          true,
 		workDir:             "", // will be set on first prompt
 		promptStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
 		outputStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
@@ -625,13 +626,13 @@ func (m Model) handleHistorySearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // and FormatTable (no override) if no suffix is found.
 func parseFormatSuffix(input string) (string, output.Format) {
 	if strings.HasSuffix(input, "\\G") {
-		return strings.TrimSpace(strings.TrimSuffix(input, "\\G")), output.FormatVertical
+		return strings.TrimSuffix(input, "\\G"), output.FormatVertical
 	}
 	if strings.HasSuffix(input, "\\j") {
-		return strings.TrimSpace(strings.TrimSuffix(input, "\\j")), output.FormatJSON
+		return strings.TrimSuffix(input, "\\j"), output.FormatJSON
 	}
 	if strings.HasSuffix(input, "\\m") {
-		return strings.TrimSpace(strings.TrimSuffix(input, "\\m")), output.FormatMarkdown
+		return strings.TrimSuffix(input, "\\m"), output.FormatMarkdown
 	}
 	return input, output.FormatTable
 }
@@ -1205,7 +1206,13 @@ func (m Model) execSourceFile(filePath string) (tea.Model, tea.Cmd) {
 // executeInput runs the SQL statement asynchronously and displays the result.
 // formatOverride specifies a per-query output format (FormatTable = use global default).
 func (m Model) executeInput(input string, formatOverride output.Format) (tea.Model, tea.Cmd) {
-	// Remove trailing semicolons
+	// Save original input (with semicolon and format suffix) for history and display
+	originalInput := input
+	if suffix := formatSuffixString(formatOverride); suffix != "" {
+		originalInput = input + suffix
+	}
+
+	// Remove trailing semicolons for execution
 	input = strings.TrimRight(input, ";")
 	input = strings.TrimSpace(input)
 
@@ -1214,18 +1221,12 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 		return m, nil
 	}
 
-	// Save to history (append format suffix if override was specified)
-	historyEntry := input
-	if suffix := formatSuffixString(formatOverride); suffix != "" {
-		historyEntry = input + " " + suffix
-	}
+	// Save to history (use original input to preserve semicolon and format suffix)
+	historyEntry := strings.TrimSpace(originalInput)
 	m.deps.History.Append(historyEntry)
 
 	// Echo the input line to output area (like mysql CLI)
-	displayEntry := input + ";"
-	if suffix := formatSuffixString(formatOverride); suffix != "" {
-		displayEntry = input + " " + suffix
-	}
+	displayEntry := strings.TrimSpace(originalInput)
 	m.addOutput(m.prompt + displayEntry)
 
 	// Normalize table name casing in SQL before execution

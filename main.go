@@ -418,16 +418,128 @@ func parseArgs() error {
 			fmt.Printf("mysh version %s\n", version)
 			os.Exit(0)
 		default:
-			// Check for DSN-style argument (user:pass@host:port/db)
-			if strings.Contains(args[i], "@") || strings.Contains(args[i], ":") && !strings.HasPrefix(args[i], "-") {
-				fmt.Fprintf(os.Stderr, "Warning: DSN-style argument not supported, use flags instead\n")
-			} else if strings.HasPrefix(args[i], "-") {
+			if strings.HasPrefix(args[i], "-") {
 				fmt.Fprintf(os.Stderr, "Unknown flag: %s\n\n", args[i])
 				printUsage()
 				return fmt.Errorf("unknown flag: %s", args[i])
+			} else if isDSNArg(args[i]) {
+				// DSN-style argument: user:password@tcp(host:port)/database?params
+				if err := parseDSNArg(args[i]); err != nil {
+					return err
+				}
+			} else if flagDatabase == "" {
+				// Treat trailing non-flag argument as database name (like mysql CLI)
+				flagDatabase = args[i]
 			}
 		}
 	}
+	return nil
+}
+
+// parseDSNArg parses a DSN-style connection string and sets the corresponding flags.
+// Supported format: [user[:password]@tcp(][host][:port])[/(database)[?params]]
+// Examples:
+//
+//	user:pass@tcp(127.0.0.1:3306)/testdb?charset=utf8mb4
+//	user:pass@127.0.0.1:3306/testdb
+//	user@127.0.0.1/testdb
+//	127.0.0.1:3306/testdb
+//	127.0.0.1/testdb
+//	testdb
+// isDSNArg checks if the argument looks like a DSN connection string
+// rather than a plain database name.
+func isDSNArg(arg string) bool {
+	return strings.Contains(arg, "@") ||
+		strings.Contains(arg, "/") ||
+		(strings.Contains(arg, ":") && !strings.HasPrefix(arg, "-"))
+}
+
+func parseDSNArg(dsn string) error {
+	s := dsn
+
+	// Extract user:password@ if present
+	if atIdx := strings.LastIndex(s, "@"); atIdx >= 0 {
+		userPart := s[:atIdx]
+		s = s[atIdx+1:]
+
+		if colonIdx := strings.Index(userPart, ":"); colonIdx >= 0 {
+			if flagUser == "" {
+				flagUser = userPart[:colonIdx]
+			}
+			if flagPassword == "" {
+				flagPassword = userPart[colonIdx+1:]
+			}
+		} else {
+			if flagUser == "" {
+				flagUser = userPart
+			}
+		}
+	}
+
+	// Strip tcp() wrapper if present
+	if strings.HasPrefix(s, "tcp(") {
+		// Find the matching closing )
+		if closeIdx := strings.Index(s, ")"); closeIdx >= 0 {
+			s = s[4:closeIdx] + s[closeIdx+1:]
+		} else {
+			s = strings.TrimPrefix(s, "tcp(")
+		}
+	}
+
+	// Extract /database and ?params
+	if slashIdx := strings.Index(s, "/"); slashIdx >= 0 {
+		dbPart := s[slashIdx+1:]
+		s = s[:slashIdx]
+
+		// Extract ?params
+		if qIdx := strings.Index(dbPart, "?"); qIdx >= 0 {
+			params := dbPart[qIdx+1:]
+			dbPart = dbPart[:qIdx]
+
+			// Parse charset from params
+			for _, param := range strings.Split(params, "&") {
+				if strings.HasPrefix(param, "charset=") {
+					if flagCharset == "" {
+						flagCharset = param[8:]
+					}
+				}
+			}
+		}
+
+		if dbPart != "" && flagDatabase == "" {
+			flagDatabase = dbPart
+		}
+	}
+
+	// Remaining s is host[:port]
+	if s != "" {
+		if colonIdx := strings.LastIndex(s, ":"); colonIdx >= 0 {
+			hostPart := s[:colonIdx]
+			portPart := s[colonIdx+1:]
+
+			// Check if portPart is actually a port number
+			port := 0
+			fmt.Sscanf(portPart, "%d", &port)
+			if port > 0 {
+				if flagHost == "" {
+					flagHost = hostPart
+				}
+				if flagPort == 0 {
+					flagPort = port
+				}
+			} else {
+				// Not a valid port, treat whole thing as host
+				if flagHost == "" {
+					flagHost = s
+				}
+			}
+		} else {
+			if flagHost == "" {
+				flagHost = s
+			}
+		}
+	}
+
 	return nil
 }
 
