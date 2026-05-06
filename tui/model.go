@@ -838,9 +838,13 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(cmd)
 	command := parts[0]
 
-	// Strip trailing semicolons from all arguments (users may type \use mydb; out of habit)
-	for i := 1; i < len(parts); i++ {
-		parts[i] = strings.TrimRight(parts[i], ";")
+	// Strip trailing semicolons from arguments for most commands
+	// (users may type \use mydb; out of habit).
+	// Exception: \sys and \pipe where semicolons are shell operators.
+	if command != "\\sys" && command != "\\!" && command != "\\pipe" && command != "\\|" {
+		for i := 1; i < len(parts); i++ {
+			parts[i] = strings.TrimRight(parts[i], ";")
+		}
 	}
 
 	switch command {
@@ -1194,12 +1198,15 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 
 	case "\\sys", "\\!":
-		if len(parts) < 2 {
+		// Use raw text after the command (preserves shell operators like ;, |, &&)
+		sysCmd := strings.TrimSpace(strings.TrimPrefix(cmd, command))
+		if sysCmd == "" {
 			m.addOutput("Usage: \\sys <command> [args...]")
 			m.addOutput("  Execute a system command from within mysh.")
 			m.addOutput("  Example: \\sys ls -la")
+			m.addOutput("  Example: \\sys ls; pwd")
 		} else {
-			m.handleSys(parts[1:])
+			m.handleSys([]string{sysCmd})
 		}
 
 	default:
@@ -2597,8 +2604,20 @@ func (m *Model) handleCopy(what string) {
 }
 
 // handleSys executes a system command and displays its output.
+// cmdParts is either a single raw command string (from \sys) or split args.
 func (m *Model) handleSys(cmdParts []string) {
-	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+	// Join parts back into a single command string
+	cmdStr := strings.Join(cmdParts, " ")
+
+	// If the command contains shell operators, run via sh -c
+	if m.needsShell(cmdStr) {
+		m.execShellCommand(cmdStr)
+		return
+	}
+
+	// Otherwise, split into command and args for direct execution
+	fields := strings.Fields(cmdStr)
+	cmd := exec.Command(fields[0], fields[1:]...)
 	if m.workDir != "" {
 		cmd.Dir = m.workDir
 	}
@@ -2619,6 +2638,39 @@ func (m *Model) handleSys(cmdParts []string) {
 	out := strings.TrimRight(stdout.String(), "\n")
 	if out != "" {
 		// Split multi-line output and add each line
+		for _, line := range strings.Split(out, "\n") {
+			m.addOutput(line)
+		}
+	}
+}
+
+// needsShell checks if the command string contains shell operators that require sh -c.
+func (m *Model) needsShell(cmdStr string) bool {
+	return strings.ContainsAny(cmdStr, ";|&<>") || strings.Contains(cmdStr, "$(")
+}
+
+// execShellCommand runs a command via sh -c for shell operator support.
+func (m *Model) execShellCommand(cmdStr string) {
+	cmd := exec.Command("sh", "-c", cmdStr)
+	if m.workDir != "" {
+		cmd.Dir = m.workDir
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		errMsg := strings.TrimRight(stderr.String(), "\n")
+		if errMsg != "" {
+			m.addOutput(fmt.Sprintf("ERROR: %s\n%s", err, errMsg))
+		} else {
+			m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		}
+		return
+	}
+
+	out := strings.TrimRight(stdout.String(), "\n")
+	if out != "" {
 		for _, line := range strings.Split(out, "\n") {
 			m.addOutput(line)
 		}
