@@ -207,6 +207,8 @@ type execMultiResultMsg struct {
 	err     error
 	format  output.Format
 	stmts   []string // original SQL text of each statement
+	// perFormat[i] is the format override for stmts[i] (nil means use global format)
+	perFormat []output.Format
 }
 
 // execTickMsg is sent periodically during query execution to update the timer/spinner.
@@ -274,7 +276,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if i > 0 {
 					m.addOutput("") // blank line between results
 				}
-				if lastCmd := m.displayQueryResult(result, nil, msg.format); lastCmd != nil {
+				// Use per-statement format override if available
+				var stmtFmt output.Format
+				if i < len(msg.perFormat) {
+					stmtFmt = msg.perFormat[i]
+				} else {
+					stmtFmt = msg.format
+				}
+				if lastCmd := m.displayQueryResult(result, nil, stmtFmt); lastCmd != nil {
 					cmd = lastCmd
 				}
 			}
@@ -662,6 +671,25 @@ func parseFormatSuffix(input string) (string, output.Format) {
 		return strings.TrimSuffix(input, "\\m"), output.FormatMarkdown
 	}
 	return input, output.FormatTable
+}
+
+// splitStatementsWithFormats splits SQL text by semicolons and extracts per-statement format overrides.
+// Returns both the statement list and a parallel list of format overrides (nil entries mean "use global").
+func (m *Model) splitStatementsWithFormats(sql string) ([]string, []output.Format) {
+	rawStmts := executor.SplitStatements(sql)
+	var stmts []string
+	var perFmt []output.Format
+
+	for _, s := range rawStmts {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		trimmed, fmt := parseFormatSuffix(s)
+		stmts = append(stmts, trimmed)
+		perFmt = append(perFmt, fmt)
+	}
+	return stmts, perFmt
 }
 
 // formatSuffixString returns the display suffix for a format override.
@@ -1336,8 +1364,13 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 
 	// Check if input contains multiple statements (has internal semicolons)
 	// by attempting to split; if more than one, use ExecuteMulti
-	stmts := executor.SplitStatements(execSQL)
+	stmts, perFmt := m.splitStatementsWithFormats(execSQL)
 	if len(stmts) > 1 {
+		// Apply the outer formatOverride to the last statement only
+		// (e.g., "select 1; select 2\G" → only the 2nd result uses vertical)
+		if len(perFmt) > 0 && formatOverride != output.FormatTable {
+			perFmt[len(perFmt)-1] = formatOverride
+		}
 		// Multi-statement execution
 		return m, tea.Batch(
 			func() tea.Msg {
@@ -1345,11 +1378,11 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 				for i, stmt := range stmts {
 					result, err := m.deps.Executor.Execute(context.Background(), stmt)
 					if err != nil {
-						return execMultiResultMsg{results, err, formatOverride, stmts[:i+1]}
+						return execMultiResultMsg{results, err, output.FormatTable, stmts[:i+1], perFmt[:i+1]}
 					}
 					results = append(results, result)
 				}
-				return execMultiResultMsg{results, nil, formatOverride, stmts}
+				return execMultiResultMsg{results, nil, output.FormatTable, stmts, perFmt}
 			},
 			tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
 				return execTickMsg(t)
@@ -2603,6 +2636,17 @@ func (m *Model) handleCopy(what string) {
 	}
 }
 
+// interactiveCommands lists commands that require a real TTY (terminal).
+var interactiveCommands = map[string]bool{
+	"vi": true, "vim": true, "nano": true, "emacs": true,
+	"less": true, "more": true,
+	"top": true, "htop": true, "btop": true,
+	"tmux": true, "screen": true,
+	"mysql": true, "psql": true, "sqlite3": true,
+	"ssh": true, "telnet": true,
+	"man": true,
+}
+
 // handleSys executes a system command and displays its output.
 // cmdParts is either a single raw command string (from \sys) or split args.
 func (m *Model) handleSys(cmdParts []string) {
@@ -2617,6 +2661,13 @@ func (m *Model) handleSys(cmdParts []string) {
 
 	// Otherwise, split into command and args for direct execution
 	fields := strings.Fields(cmdStr)
+
+	// Interactive commands need a real TTY — suspend TUI and connect directly
+	if interactiveCommands[fields[0]] {
+		m.execInteractiveCommand(fields)
+		return
+	}
+
 	cmd := exec.Command(fields[0], fields[1:]...)
 	if m.workDir != "" {
 		cmd.Dir = m.workDir
@@ -2674,6 +2725,26 @@ func (m *Model) execShellCommand(cmdStr string) {
 		for _, line := range strings.Split(out, "\n") {
 			m.addOutput(line)
 		}
+	}
+}
+
+// execInteractiveCommand runs a command that needs a real TTY.
+// It suspends the TUI, connects stdin/stdout/stderr to the real terminal,
+// and resumes the TUI after the command exits.
+func (m *Model) execInteractiveCommand(fields []string) {
+	tea.ExitAltScreen()
+	defer tea.EnterAltScreen()
+
+	cmd := exec.Command(fields[0], fields[1:]...)
+	if m.workDir != "" {
+		cmd.Dir = m.workDir
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
 	}
 }
 
