@@ -108,7 +108,7 @@ func TestIsQueryStatement_WithComments(t *testing.T) {
 	}
 }
 
-// ---- splitStatements tests ----
+// ---- SplitStatements tests ----
 
 func TestSplitStatements(t *testing.T) {
 	tests := []struct {
@@ -125,18 +125,18 @@ func TestSplitStatements(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := splitStatements(tt.input)
+		got := SplitStatements(tt.input)
 		if len(got) != tt.want {
-			t.Errorf("splitStatements(%q) = %d statements, want %d", tt.input, len(got), tt.want)
+			t.Errorf("SplitStatements(%q) = %d statements, want %d", tt.input, len(got), tt.want)
 		}
 	}
 }
 
 func TestSplitStatements_RespectsStrings(t *testing.T) {
 	input := "INSERT INTO t VALUES ('a;b'); SELECT 1"
-	stmts := splitStatements(input)
+	stmts := SplitStatements(input)
 	if len(stmts) != 2 {
-		t.Errorf("splitStatements() = %d statements, want 2", len(stmts))
+		t.Errorf("SplitStatements() = %d statements, want 2", len(stmts))
 	}
 	if stmts[0] != "INSERT INTO t VALUES ('a;b')" {
 		t.Errorf("stmts[0] = %q, want %q", stmts[0], "INSERT INTO t VALUES ('a;b')")
@@ -145,9 +145,9 @@ func TestSplitStatements_RespectsStrings(t *testing.T) {
 
 func TestSplitStatements_RespectsComments(t *testing.T) {
 	input := "SELECT 1 -- comment; not a separator\n; SELECT 2"
-	stmts := splitStatements(input)
+	stmts := SplitStatements(input)
 	if len(stmts) != 2 {
-		t.Errorf("splitStatements() = %d statements, want 2", len(stmts))
+		t.Errorf("SplitStatements() = %d statements, want 2", len(stmts))
 	}
 }
 
@@ -264,31 +264,31 @@ func TestIsQueryStatement_CommentOnlyLineComment(t *testing.T) {
 	}
 }
 
-// ---- splitStatements additional edge cases ----
+// ---- SplitStatements additional edge cases ----
 
 func TestSplitStatements_DoubleQuotedString(t *testing.T) {
 	input := `INSERT INTO t VALUES ("a;b"); SELECT 1`
-	stmts := splitStatements(input)
+	stmts := SplitStatements(input)
 	if len(stmts) != 2 {
-		t.Errorf("splitStatements with double-quoted string = %d statements, want 2", len(stmts))
+		t.Errorf("SplitStatements with double-quoted string = %d statements, want 2", len(stmts))
 	}
 }
 
 func TestSplitStatements_EscapedQuote(t *testing.T) {
 	input := `INSERT INTO t VALUES ('it\'s; ok'); SELECT 1`
-	stmts := splitStatements(input)
+	stmts := SplitStatements(input)
 	if len(stmts) != 2 {
-		t.Errorf("splitStatements with escaped quote = %d statements, want 2", len(stmts))
+		t.Errorf("SplitStatements with escaped quote = %d statements, want 2", len(stmts))
 	}
 }
 
 func TestSplitStatements_BlockComment(t *testing.T) {
-	// Note: splitStatements does NOT skip semicolons inside block comments
+	// Note: SplitStatements does NOT skip semicolons inside block comments
 	// It only respects string literals and single-line comments
 	input := "SELECT 1 /* comment; inside */; SELECT 2"
-	stmts := splitStatements(input)
+	stmts := SplitStatements(input)
 	if len(stmts) != 3 {
-		t.Logf("splitStatements with block comment = %d statements (block comment semicolons are NOT skipped)", len(stmts))
+		t.Logf("SplitStatements with block comment = %d statements (block comment semicolons are NOT skipped)", len(stmts))
 		for i, s := range stmts {
 			t.Logf("  stmt[%d] = %q", i, s)
 		}
@@ -297,17 +297,17 @@ func TestSplitStatements_BlockComment(t *testing.T) {
 
 func TestSplitStatements_UnclosedBlockComment(t *testing.T) {
 	input := "SELECT 1 /* unclosed; comment"
-	stmts := splitStatements(input)
+	stmts := SplitStatements(input)
 	if len(stmts) != 1 {
-		t.Errorf("splitStatements with unclosed block comment = %d statements, want 1", len(stmts))
+		t.Errorf("SplitStatements with unclosed block comment = %d statements, want 1", len(stmts))
 	}
 }
 
 func TestSplitStatements_MultipleSemicolonsWithContent(t *testing.T) {
 	input := "SELECT 1;; SELECT 2;"
-	stmts := splitStatements(input)
+	stmts := SplitStatements(input)
 	if len(stmts) != 2 {
-		t.Errorf("splitStatements with double semicolons = %d statements, want 2", len(stmts))
+		t.Errorf("SplitStatements with double semicolons = %d statements, want 2", len(stmts))
 	}
 }
 

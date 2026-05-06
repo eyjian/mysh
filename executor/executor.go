@@ -272,7 +272,7 @@ func (e *Executor) executeOnce(ctx context.Context, query string) (*QueryResult,
 
 // ExecuteMulti executes multiple SQL statements separated by semicolons.
 func (e *Executor) ExecuteMulti(ctx context.Context, sql string) ([]*QueryResult, error) {
-	statements := splitStatements(sql)
+	statements := SplitStatements(sql)
 	var results []*QueryResult
 
 	for _, stmt := range statements {
@@ -329,9 +329,9 @@ func (e *Executor) isQueryStatement(query string) bool {
 	return false
 }
 
-// splitStatements splits SQL text into individual statements by semicolons,
+// SplitStatements splits SQL text into individual statements by semicolons,
 // respecting string literals and comments.
-func splitStatements(sql string) []string {
+func SplitStatements(sql string) []string {
 	var statements []string
 	var current strings.Builder
 	inString := false

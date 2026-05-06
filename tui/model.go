@@ -201,6 +201,14 @@ type execResultMsg struct {
 	err            error
 }
 
+// execMultiResultMsg is sent when multiple async SQL statements complete.
+type execMultiResultMsg struct {
+	results []*executor.QueryResult
+	err     error
+	format  output.Format
+	stmts   []string // original SQL text of each statement
+}
+
 // execTickMsg is sent periodically during query execution to update the timer/spinner.
 type execTickMsg time.Time
 
@@ -254,6 +262,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.execStart = time.Time{}
 		m.spinnerFrame = 0
 		cmd = m.displayQueryResult(msg.result, msg.err, msg.formatOverride)
+
+	case execMultiResultMsg:
+		m.executing = false
+		m.execStart = time.Time{}
+		m.spinnerFrame = 0
+		if msg.err != nil {
+			m.addOutput(fmt.Sprintf("%s", msg.err))
+		} else {
+			for i, result := range msg.results {
+				if i > 0 {
+					m.addOutput("") // blank line between results
+				}
+				if lastCmd := m.displayQueryResult(result, nil, msg.format); lastCmd != nil {
+					cmd = lastCmd
+				}
+			}
+		}
 
 	case execTickMsg:
 		if m.executing {
@@ -651,6 +676,38 @@ func formatSuffixString(f output.Format) string {
 	}
 }
 
+// highlightDisplayEntry applies syntax highlighting to the SQL portion of a display entry,
+// preserving format suffixes (\G, \j, \m) and semicolons outside the highlighted SQL.
+func (m Model) highlightDisplayEntry(entry string) string {
+	if m.deps.Highlighter == nil {
+		return entry
+	}
+
+	// Separate format suffix if present
+	suffix := ""
+	trimmed := entry
+	if strings.HasSuffix(entry, "\\G") {
+		suffix = "\\G"
+		trimmed = strings.TrimSuffix(entry, "\\G")
+	} else if strings.HasSuffix(entry, "\\j") {
+		suffix = "\\j"
+		trimmed = strings.TrimSuffix(entry, "\\j")
+	} else if strings.HasSuffix(entry, "\\m") {
+		suffix = "\\m"
+		trimmed = strings.TrimSuffix(entry, "\\m")
+	}
+
+	// Highlight the SQL portion
+	highlighted := m.deps.Highlighter.Highlight(trimmed)
+
+	// Re-append the format suffix (unhighlighted)
+	if suffix != "" {
+		highlighted += suffix
+	}
+
+	return highlighted
+}
+
 // hasFormatSuffix returns true if the input ends with a recognized format suffix.
 func hasFormatSuffix(input string) bool {
 	return strings.HasSuffix(input, "\\G") ||
@@ -743,7 +800,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	// Multi-line: if no semicolon at end and no format suffix, continue input
 	if !strings.HasSuffix(trimmed, ";") && formatOverride == output.FormatTable {
 		// Move current input line to output area, start fresh line
-		m.addOutput(m.prompt + input)
+		m.addOutput(m.prompt + m.highlightDisplayEntry(input))
 		m.multilineParts = append(m.multilineParts, input)
 		m.ed.Clear()
 		m.multiline = true
@@ -1225,9 +1282,9 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 	historyEntry := strings.TrimSpace(originalInput)
 	m.deps.History.Append(historyEntry)
 
-	// Echo the input line to output area (like mysql CLI)
+	// Echo the input line to output area (like mysql CLI), with syntax highlighting
 	displayEntry := strings.TrimSpace(originalInput)
-	m.addOutput(m.prompt + displayEntry)
+	m.addOutput(m.prompt + m.highlightDisplayEntry(displayEntry))
 
 	// Normalize table name casing in SQL before execution
 	execSQL := m.normalizeTableNames(input + ";")
@@ -1239,7 +1296,30 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 	// Save the query for \watch
 	m.lastQuery = input
 
-	// Execute asynchronously and start timer tick
+	// Check if input contains multiple statements (has internal semicolons)
+	// by attempting to split; if more than one, use ExecuteMulti
+	stmts := executor.SplitStatements(execSQL)
+	if len(stmts) > 1 {
+		// Multi-statement execution
+		return m, tea.Batch(
+			func() tea.Msg {
+				var results []*executor.QueryResult
+				for i, stmt := range stmts {
+					result, err := m.deps.Executor.Execute(context.Background(), stmt)
+					if err != nil {
+						return execMultiResultMsg{results, err, formatOverride, stmts[:i+1]}
+					}
+					results = append(results, result)
+				}
+				return execMultiResultMsg{results, nil, formatOverride, stmts}
+			},
+			tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+				return execTickMsg(t)
+			}),
+		)
+	}
+
+	// Single statement execution
 	return m, tea.Batch(
 		func() tea.Msg {
 			result, err := m.deps.Executor.Execute(context.Background(), execSQL)
@@ -1484,7 +1564,7 @@ func (m Model) handleEdit() (tea.Model, tea.Cmd) {
 	// Clear the input line and execute the edited SQL
 	m.ed.Clear()
 	m.multiline = false
-	m.addOutput(m.prompt + sql)
+	m.addOutput(m.prompt + m.highlightDisplayEntry(sql))
 	return m.executeInput(sql, output.FormatTable)
 }
 
