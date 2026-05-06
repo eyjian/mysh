@@ -436,14 +436,19 @@ func buildKeywordSuggestions() []Suggestion {
 	keywords := []string{
 		"SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "DELETE",
 		"CREATE", "ALTER", "DROP", "TRUNCATE", "TABLE", "INDEX", "VIEW", "DATABASE",
+		"SCHEMA", "SEQUENCE",
 		"JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "CROSS", "FULL", "ON", "USING",
 		"AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN", "EXISTS",
+		"ILIKE", "SIMILAR", "ANY", "SOME",
 		"AS", "DISTINCT", "GROUP", "BY", "ORDER", "ASC", "DESC", "HAVING",
 		"LIMIT", "OFFSET", "UNION", "ALL", "SET", "SHOW", "DESCRIBE", "EXPLAIN",
 		"USE", "IF", "CASE", "WHEN", "THEN", "ELSE", "END", "BEGIN",
 		"COMMIT", "ROLLBACK", "PRIMARY", "KEY", "UNIQUE", "FOREIGN",
-		"DEFAULT", "AUTO_INCREMENT", "CONSTRAINT", "REFERENCES",
+		"DEFAULT", "AUTO_INCREMENT", "SERIAL", "BIGSERIAL", "CONSTRAINT", "REFERENCES",
 		"GRANT", "REVOKE", "FLUSH", "WITH", "RECURSIVE",
+		"RETURNING", "LATERAL", "OVER", "PARTITION", "WINDOW",
+		"MATERIALIZED", "CONCURRENTLY", "ONLY", "RETURN",
+		"VACUUM", "ANALYZE", "REINDEX",
 	}
 	suggestions := make([]Suggestion, len(keywords))
 	for i, k := range keywords {

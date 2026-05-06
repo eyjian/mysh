@@ -8,14 +8,16 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 
 	"github.com/eyjian/mysh/config"
 )
 
-// Pool manages MySQL database connections.
+// Pool manages database connections.
 type Pool struct {
 	db           *sql.DB
 	cfg          *config.ConnectionConfig
+	adapter      DBAdapter
 	closed       bool
 	connTimeout  time.Duration // per-query connection timeout (default 30s)
 	lastActivity time.Time     // last successful query timestamp
@@ -28,7 +30,10 @@ func New(cfg *config.ConnectionConfig) (*Pool, error) {
 		return nil, fmt.Errorf("connection config is nil")
 	}
 
-	db, err := sql.Open("mysql", cfg.DSN())
+	adapter := NewAdapter(cfg.Driver)
+
+	db, err := sql.Open(adapter.DriverName(), adapter.DSN(
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.Charset))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -50,6 +55,7 @@ func New(cfg *config.ConnectionConfig) (*Pool, error) {
 			return &Pool{
 				db:           db,
 				cfg:          cfg,
+				adapter:      adapter,
 				connTimeout:  30 * time.Second,
 				lastActivity: time.Now(),
 			}, nil
@@ -66,12 +72,17 @@ func New(cfg *config.ConnectionConfig) (*Pool, error) {
 
 // NewWithDB creates a Pool from an existing *sql.DB (for testing).
 func NewWithDB(db *sql.DB, cfg *config.ConnectionConfig) *Pool {
-	return &Pool{db: db, cfg: cfg}
+	return &Pool{db: db, cfg: cfg, adapter: NewAdapter(cfg.Driver)}
 }
 
 // DB returns the underlying *sql.DB instance.
 func (p *Pool) DB() *sql.DB {
 	return p.db
+}
+
+// Adapter returns the DBAdapter in use.
+func (p *Pool) Adapter() DBAdapter {
+	return p.adapter
 }
 
 // Close closes the connection pool.
@@ -109,7 +120,7 @@ func (p *Pool) Query(query string, args ...interface{}) (*sql.Rows, error) {
 		return rows, nil
 	}
 	// Connection error — try reconnect and retry
-	if IsConnectionError(err) {
+	if p.adapter.IsConnectionError(err) {
 		if reconnErr := p.Reconnect(); reconnErr != nil {
 			return nil, fmt.Errorf("connection lost and reconnect failed: %w", reconnErr)
 		}
@@ -140,7 +151,7 @@ func (p *Pool) Exec(query string, args ...interface{}) (sql.Result, error) {
 		return res, nil
 	}
 	// Connection error — try reconnect and retry
-	if IsConnectionError(err) {
+	if p.adapter.IsConnectionError(err) {
 		if reconnErr := p.Reconnect(); reconnErr != nil {
 			return nil, fmt.Errorf("connection lost and reconnect failed: %w", reconnErr)
 		}
@@ -189,10 +200,12 @@ func (p *Pool) IsIdleTooLong(idleThreshold time.Duration) bool {
 }
 
 // IsConnectionError checks if an error is caused by a lost connection.
+// This delegates to the adapter's implementation.
 func IsConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Use a generic check that covers both MySQL and PG
 	msg := err.Error()
 	return strings.Contains(msg, "invalid connection") ||
 		strings.Contains(msg, "bad connection") ||
@@ -202,23 +215,23 @@ func IsConnectionError(err error) bool {
 		strings.Contains(msg, "server has gone away") ||
 		strings.Contains(msg, "connect: connection refused") ||
 		strings.Contains(msg, "i/o timeout") ||
-		strings.Contains(msg, "driver: bad conn")
+		strings.Contains(msg, "driver: bad conn") ||
+		strings.Contains(msg, "conn closed") ||
+		strings.Contains(msg, "connection unexpectedly closed")
 }
 
 // CurrentDB returns the currently selected database name.
 func (p *Pool) CurrentDB() string {
-	var db string
-	err := p.db.QueryRow("SELECT DATABASE()").Scan(&db)
+	name, err := p.adapter.CurrentDB(p.db)
 	if err != nil {
 		return ""
 	}
-	return db
+	return name
 }
 
 // UseDB switches the current database.
 func (p *Pool) UseDB(ctx context.Context, dbName string) error {
-	_, err := p.db.ExecContext(ctx, "USE `"+dbName+"`")
-	return err
+	return p.adapter.UseDB(ctx, p.db, dbName)
 }
 
 // Reset re-establishes the connection with a new config.
@@ -229,8 +242,10 @@ func (p *Pool) Reset(cfg *config.ConnectionConfig) error {
 
 	p.cfg = cfg
 	p.closed = false
+	p.adapter = NewAdapter(cfg.Driver)
 
-	db, err := sql.Open("mysql", cfg.DSN())
+	db, err := sql.Open(p.adapter.DriverName(), p.adapter.DSN(
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.Charset))
 	if err != nil {
 		return fmt.Errorf("failed to reset connection: %w", err)
 	}
@@ -265,75 +280,17 @@ func (p *Pool) Reconnect() error {
 
 // Databases returns a list of all accessible databases.
 func (p *Pool) Databases() ([]string, error) {
-	rows, err := p.db.Query("SHOW DATABASES")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var dbs []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		dbs = append(dbs, name)
-	}
-	return dbs, rows.Err()
+	return p.adapter.Databases(p.db)
 }
 
 // Tables returns a list of tables in the current or specified database.
 func (p *Pool) Tables(database string) ([]string, error) {
-	query := "SHOW TABLES"
-	if database != "" {
-		query = fmt.Sprintf("SHOW TABLES FROM `%s`", database)
-	}
-
-	rows, err := p.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		tables = append(tables, name)
-	}
-	return tables, rows.Err()
+	return p.adapter.Tables(p.db, database)
 }
 
 // Columns returns column names for a given table.
 func (p *Pool) Columns(database, table string) ([]ColumnInfo, error) {
-	query := fmt.Sprintf("SHOW COLUMNS FROM `%s`", table)
-	if database != "" {
-		query = fmt.Sprintf("SHOW COLUMNS FROM `%s`.`%s`", database, table)
-	}
-
-	rows, err := p.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var cols []ColumnInfo
-	for rows.Next() {
-		var field, typ, null, key string
-		var def, extra sql.NullString
-		if err := rows.Scan(&field, &typ, &null, &key, &def, &extra); err != nil {
-			return nil, err
-		}
-		cols = append(cols, ColumnInfo{
-			Name:     field,
-			Type:     typ,
-			Nullable: null == "YES",
-			Key:      key,
-		})
-	}
-	return cols, rows.Err()
+	return p.adapter.Columns(p.db, database, table)
 }
 
 // ColumnInfo holds metadata about a database column.
@@ -354,142 +311,20 @@ type TableIndexInfo struct {
 
 // ShowCreateTable returns the CREATE TABLE statement for a table.
 func (p *Pool) ShowCreateTable(database, table string) (string, error) {
-	query := fmt.Sprintf("SHOW CREATE TABLE `%s`", table)
-	if database != "" {
-		query = fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", database, table)
-	}
-
-	rows, err := p.db.Query(query)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-
-	cols, _ := rows.Columns()
-	// MySQL returns: Table, Create Table, ...
-	// MariaDB may return: Table, Create Table, ...
-	// Allocate scanners for all columns
-	values := make([]sql.NullString, len(cols))
-	scanArgs := make([]interface{}, len(cols))
-	for i := range values {
-		scanArgs[i] = &values[i]
-	}
-
-	if rows.Next() {
-		if err := rows.Scan(scanArgs...); err != nil {
-			return "", err
-		}
-		// The CREATE TABLE statement is in the second column
-		if len(values) >= 2 && values[1].Valid {
-			return values[1].String, nil
-		}
-	}
-	return "", rows.Err()
+	return p.adapter.ShowCreateTable(p.db, database, table)
 }
 
 // ShowIndexes returns index information for a table.
 func (p *Pool) ShowIndexes(database, table string) ([]TableIndexInfo, error) {
-	query := fmt.Sprintf("SHOW INDEX FROM `%s`", table)
-	if database != "" {
-		query = fmt.Sprintf("SHOW INDEX FROM `%s`.`%s`", database, table)
-	}
-
-	rows, err := p.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var indexes []TableIndexInfo
-	for rows.Next() {
-		var table1, nonUnique, keyName, seqInIndex, colName, collation,
-			cardinality, subPart, packed, nullable, indexType, comment,
-			indexComment, visible string
-		var nullablePtr, subPartPtr, packedPtr, commentPtr, indexCommentPtr, visiblePtr sql.NullString
-
-		if err := rows.Scan(&table1, &nonUnique, &keyName, &seqInIndex,
-			&colName, &collation, &cardinality, &subPartPtr, &packedPtr,
-			&nullablePtr, &indexType, &commentPtr, &indexCommentPtr, &visiblePtr); err != nil {
-			// Try simpler scan for older MySQL versions
-			rows.Close()
-			return p.showIndexesSimple(database, table)
-		}
-
-		_ = nullable
-		_ = subPart
-		_ = packed
-		_ = comment
-		_ = indexComment
-		_ = visible
-
-		indexes = append(indexes, TableIndexInfo{
-			Name:      keyName,
-			Columns:   colName,
-			NonUnique: nonUnique == "1",
-			Type:      indexType,
-		})
-	}
-	return indexes, rows.Err()
+	return p.adapter.ShowIndexes(p.db, database, table)
 }
 
-// showIndexesSimple is a fallback for MySQL versions with fewer SHOW INDEX columns.
-func (p *Pool) showIndexesSimple(database, table string) ([]TableIndexInfo, error) {
-	query := fmt.Sprintf("SHOW INDEX FROM `%s`", table)
-	if database != "" {
-		query = fmt.Sprintf("SHOW INDEX FROM `%s`.`%s`", database, table)
-	}
+// DescribeTableSQL returns the SQL for describing a table.
+func (p *Pool) DescribeTableSQL(database, table string) string {
+	return p.adapter.DescribeTableSQL(database, table)
+}
 
-	rows, err := p.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var indexes []TableIndexInfo
-	for rows.Next() {
-		// Use a dynamic scan approach
-		cols, _ := rows.Columns()
-		values := make([]interface{}, len(cols))
-		for i := range values {
-			values[i] = new(sql.NullString)
-		}
-		if err := rows.Scan(values...); err != nil {
-			return nil, err
-		}
-
-		keyName := ""
-		colName := ""
-		nonUnique := "0"
-		indexType := ""
-
-		// Standard column positions in SHOW INDEX
-		if len(cols) > 1 {
-			if v, ok := values[1].(*sql.NullString); ok && v.Valid {
-				nonUnique = v.String
-			}
-		}
-		if len(cols) > 2 {
-			if v, ok := values[2].(*sql.NullString); ok && v.Valid {
-				keyName = v.String
-			}
-		}
-		if len(cols) > 4 {
-			if v, ok := values[4].(*sql.NullString); ok && v.Valid {
-				colName = v.String
-			}
-		}
-		if len(cols) > 10 {
-			if v, ok := values[10].(*sql.NullString); ok && v.Valid {
-				indexType = v.String
-			}
-		}
-
-		indexes = append(indexes, TableIndexInfo{
-			Name:      keyName,
-			Columns:   colName,
-			NonUnique: nonUnique == "1",
-			Type:      indexType,
-		})
-	}
-	return indexes, rows.Err()
+// DescribeFullSQL returns the SQL for full column info.
+func (p *Pool) DescribeFullSQL(database, table string) string {
+	return p.adapter.DescribeFullSQL(database, table)
 }

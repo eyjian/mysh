@@ -26,8 +26,9 @@ type Config struct {
 	configPath string `mapstructure:"-"`
 }
 
-// ConnectionConfig holds MySQL connection parameters.
+// ConnectionConfig holds database connection parameters.
 type ConnectionConfig struct {
+	Driver   string `mapstructure:"driver"` // "mysql" (default) or "postgres"/"pg"
 	Host     string `mapstructure:"host"`
 	Port     int    `mapstructure:"port"`
 	User     string `mapstructure:"user"`
@@ -95,6 +96,7 @@ type FavoriteConfig struct {
 
 // SessionConfig holds a saved database session connection config.
 type SessionConfig struct {
+	Driver   string `mapstructure:"driver"`
 	Host     string `mapstructure:"host"`
 	Port     int    `mapstructure:"port"`
 	User     string `mapstructure:"user"`
@@ -106,10 +108,20 @@ type SessionConfig struct {
 // ToConnectionConfig converts a SessionConfig to a ConnectionConfig.
 func (s SessionConfig) ToConnectionConfig() ConnectionConfig {
 	port := s.Port
+	driver := s.Driver
+	if driver == "" {
+		driver = "mysql"
+	}
 	if port == 0 {
-		port = 3306
+		switch driver {
+		case "postgres", "pg":
+			port = 5432
+		default:
+			port = 3306
+		}
 	}
 	return ConnectionConfig{
+		Driver:   driver,
 		Host:     s.Host,
 		Port:     port,
 		User:     s.User,
@@ -157,13 +169,38 @@ func DefaultConfig() *Config {
 	}
 }
 
-// DSN returns the MySQL Data Source Name from connection config.
+// DSN returns the Data Source Name from connection config.
+// The format depends on the driver type.
 func (c *ConnectionConfig) DSN() string {
-	dsn := c.User + ":" + c.Password + "@tcp(" + c.Host + ":" + itoa(c.Port) + ")/" + c.Database
-	if c.Charset != "" {
-		dsn += "?charset=" + c.Charset
+	driver := c.Driver
+	if driver == "" {
+		driver = "mysql"
 	}
-	return dsn
+	switch driver {
+	case "postgres", "pg":
+		dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+			c.Host, c.Port, c.User, c.Password, c.Database)
+		if c.Charset != "" {
+			dsn += " client_encoding=" + c.Charset
+		}
+		return dsn
+	default:
+		dsn := c.User + ":" + c.Password + "@tcp(" + c.Host + ":" + itoa(c.Port) + ")/" + c.Database
+		if c.Charset != "" {
+			dsn += "?charset=" + c.Charset
+		}
+		return dsn
+	}
+}
+
+// DefaultPort returns the default port based on the driver.
+func (c *ConnectionConfig) DefaultPort() int {
+	switch c.Driver {
+	case "postgres", "pg":
+		return 5432
+	default:
+		return 3306
+	}
 }
 
 // Load reads configuration from file and applies defaults.
@@ -184,6 +221,7 @@ func Load() (*Config, error) {
 	v.AddConfigPath("/etc/mysh")
 
 	// Set defaults from our default config
+	v.SetDefault("connection.driver", cfg.Connection.Driver)
 	v.SetDefault("connection.host", cfg.Connection.Host)
 	v.SetDefault("connection.port", cfg.Connection.Port)
 	v.SetDefault("connection.user", cfg.Connection.User)

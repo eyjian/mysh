@@ -1,8 +1,8 @@
 # mysh
 
-带有语法高亮和智能自动补全的 MySQL 命令行客户端。
+带有语法高亮和智能自动补全的 MySQL / PostgreSQL 命令行客户端。
 
-在标准 MySQL CLI 体验之上，提供实时 SQL 语法高亮、上下文感知的自动补全和交互式编辑功能。
+在标准 CLI 体验之上，提供实时 SQL 语法高亮、上下文感知的自动补全和交互式编辑功能，同时支持 MySQL 和 PostgreSQL 数据库。
 
 ## 功能特性
 
@@ -22,6 +22,7 @@
 - **会话管理** — 通过 `\session` 保存、切换和删除数据库连接配置
 - **事务支持** — 支持 BEGIN/COMMIT/ROLLBACK 显式事务，专用连接绑定，`tx>` 提示符指示，退出自动回滚
 - **Schema 元数据缓存** — 自动缓存表/列信息，DDL 语句后延迟刷新
+- **PostgreSQL 支持** — 通过 `--driver postgres` 或 `postgres://` DSN 连接 PostgreSQL 数据库
 - **可配置主题** — 通过 `~/.mysh.yaml` 自定义配色方案
 - **零运行时依赖** — 单个静态二进制文件，无需 CGO
 
@@ -77,21 +78,26 @@ make build
 ### 基本连接
 
 ```bash
-# 使用参数连接
+# 连接 MySQL（默认）
 mysh -h 127.0.0.1 -P 3306 -u root -p mydb
 
+# 连接 PostgreSQL
+mysh --driver postgres -h 127.0.0.1 -P 5432 -u postgres -p mydb
+
 # 或使用 DSN 字符串
-mysh root:password@tcp(127.0.0.1:3306)/mydb
+mysh root:password@tcp(127.0.0.1:3306)/mydb           # MySQL
+mysh postgres://postgres:password@127.0.0.1:5432/mydb  # PostgreSQL
 ```
 
 ### 命令行参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `-h` | `127.0.0.1` | MySQL 主机 |
-| `-P` | `3306` | MySQL 端口 |
-| `-u` | `root` | MySQL 用户 |
-| `-p` | (空) | MySQL 密码 |
+| `--driver` | `mysql` | 数据库驱动（`mysql` 或 `postgres`） |
+| `-h` | `127.0.0.1` | 数据库主机 |
+| `-P` | `3306`/`5432` | 数据库端口（MySQL 默认 3306，PostgreSQL 默认 5432） |
+| `-u` | `root` | 数据库用户 |
+| `-p` | (空) | 数据库密码 |
 | `-d` | (空) | 默认数据库 |
 | `--config` | `~/.mysh.yaml` | 配置文件路径 |
 | `--version` | — | 打印版本号 |
@@ -227,6 +233,7 @@ mysh> \session del staging         -- 删除会话
 ```yaml
 # 连接默认值
 connection:
+  driver: "mysql"          # "mysql"（默认）或 "postgres"
   host: "127.0.0.1"
   port: 3306
   user: "root"
@@ -379,7 +386,7 @@ mysh 根据光标位置提供上下文感知的建议：
 ├─────────────────────────────────────────┤
 │             数据层                       │
 │  ┌──────────┐ ┌───────────┐ ┌────────┐ │
-│  │ MySQL    │ │ Schema    │ │ 文件   │ │
+│  │ MySQL/PG │ │ Schema    │ │ 文件   │ │
 │  │ 连接池   │ │ 缓存      │ │ 存储   │ │
 │  └──────────┘ └───────────┘ └────────┘ │
 └─────────────────────────────────────────┘
@@ -418,7 +425,7 @@ make cross-compile
 mysh/
 ├── main.go              # 入口
 ├── config/              # 配置加载
-├── connection/          # MySQL 连接池
+├── connection/          # 数据库连接池 & 适配器
 ├── tui/                 # bubbletea TUI 模型
 ├── editor/              # 行编辑器
 ├── highlight/           # SQL 分词器 & 高亮器

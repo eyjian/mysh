@@ -2552,9 +2552,9 @@ func (m *Model) handleDesc(parts []string) {
 		_ = m.displayQueryResult(result, nil, output.FormatTable)
 
 	case "full":
-		// Full column info using SHOW FULL COLUMNS
+		// Full column info using adapter's DescribeFullSQL
 		result, err := m.deps.Executor.Execute(context.Background(),
-			fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`", tableName)+";")
+			m.deps.Pool.DescribeFullSQL(db, tableName)+";")
 		if err != nil {
 			m.addOutput(fmt.Sprintf("ERROR: %s", err))
 			return
@@ -2563,7 +2563,7 @@ func (m *Model) handleDesc(parts []string) {
 
 	default: // "columns"
 		result, err := m.deps.Executor.Execute(context.Background(),
-			fmt.Sprintf("DESCRIBE `%s`", tableName)+";")
+			m.deps.Pool.DescribeTableSQL(db, tableName)+";")
 		if err != nil {
 			m.addOutput(fmt.Sprintf("ERROR: %s", err))
 			return

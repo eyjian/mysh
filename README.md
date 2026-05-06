@@ -2,9 +2,9 @@
 
 [中文文档](README_zh.md)
 
-MySQL CLI with syntax highlighting and intelligent auto-completion.
+MySQL and PostgreSQL CLI with syntax highlighting and intelligent auto-completion.
 
-An enhanced MySQL command-line client that provides real-time SQL syntax highlighting, context-aware auto-completion, and interactive editing on top of the standard MySQL CLI experience.
+An enhanced database command-line client that supports both MySQL and PostgreSQL, providing real-time SQL syntax highlighting, context-aware auto-completion, and interactive editing on top of the standard CLI experience.
 
 ## Features
 
@@ -25,6 +25,7 @@ An enhanced MySQL command-line client that provides real-time SQL syntax highlig
 - **Favorite Queries** — Bookmark SQL queries with `\fav`, list/run/delete interactively
 - **Transaction Support** — Explicit BEGIN/COMMIT/ROLLBACK with dedicated connection binding, `tx>` prompt indicator, and auto-rollback on exit
 - **SSH Tunnel** — Connect to remote MySQL through an SSH jump host via local port forwarding
+- **PostgreSQL Support** — Connect to PostgreSQL databases with `--driver postgres` or `postgres://` DSN
 - **Schema Metadata Cache** — Auto-cached table/column info with lazy refresh after DDL statements
 - **Configurable Themes** — Customizable color schemes via `~/.mysh.yaml`
 - **Zero Runtime Dependencies** — Single static binary, no CGO required
@@ -81,21 +82,26 @@ make build
 ### Basic Connection
 
 ```bash
-# Connect with DSN
+# Connect to MySQL (default)
 mysh -h 127.0.0.1 -P 3306 -u root -p mydb
 
+# Connect to PostgreSQL
+mysh --driver postgres -h 127.0.0.1 -P 5432 -u postgres -p mydb
+
 # Or use a DSN string
-mysh root:password@tcp(127.0.0.1:3306)/mydb
+mysh root:password@tcp(127.0.0.1:3306)/mydb           # MySQL
+mysh postgres://postgres:password@127.0.0.1:5432/mydb  # PostgreSQL
 ```
 
 ### Command Line Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-h` | `127.0.0.1` | MySQL host |
-| `-P` | `3306` | MySQL port |
-| `-u` | `root` | MySQL user |
-| `-p` | (empty) | MySQL password |
+| `--driver` | `mysql` | Database driver (`mysql` or `postgres`) |
+| `-h` | `127.0.0.1` | Database host |
+| `-P` | `3306`/`5432` | Database port (MySQL default: 3306, PostgreSQL default: 5432) |
+| `-u` | `root` | Database user |
+| `-p` | (empty) | Database password |
 | `-d` | (empty) | Default database |
 | `--config` | `~/.mysh.yaml` | Config file path |
 | `--ssh-host` | — | SSH tunnel host (jump server) |
@@ -270,6 +276,7 @@ Configuration file: `~/.mysh.yaml`
 ```yaml
 # Connection defaults
 connection:
+  driver: "mysql"          # "mysql" (default) or "postgres"
   host: "127.0.0.1"
   port: 3306
   user: "root"
@@ -431,7 +438,7 @@ When auto-completion has few matches, snippet templates are suggested. Press `Ta
 ├─────────────────────────────────────────┤
 │           Data Layer                     │
 │  ┌──────────┐ ┌───────────┐ ┌────────┐ │
-│  │ MySQL    │ │ Schema    │ │ File   │ │
+│  │ MySQL/PG │ │ Schema    │ │ File   │ │
 │  │ Conn Pool│ │ Cache     │ │ Store  │ │
 │  └──────────┘ └───────────┘ └────────┘ │
 └─────────────────────────────────────────┘
@@ -470,7 +477,7 @@ make cross-compile
 mysh/
 ├── main.go              # Entry point
 ├── config/              # Configuration loading
-├── connection/          # MySQL connection pool
+├── connection/          # Database connection pool & adapter
 ├── tui/                 # bubbletea TUI model
 ├── editor/              # Line editor
 ├── highlight/           # SQL tokenizer & highlighter

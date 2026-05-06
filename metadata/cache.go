@@ -225,9 +225,12 @@ func (c *Cache) ColumnsInfo(db, table string) []ColumnInfo {
 	return result
 }
 
-// Functions returns a list of MySQL built-in function names.
+// Functions returns a list of built-in function names for the current database type.
 func (c *Cache) Functions() []string {
-	return mySQLFunctions
+	if c.pool != nil && c.pool.Adapter() != nil {
+		return c.pool.Adapter().Functions()
+	}
+	return mySQLFunctions // fallback
 }
 
 // TableNames returns all table names across all databases (for fuzzy matching).

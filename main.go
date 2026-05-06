@@ -30,6 +30,7 @@ var version = "dev"
 
 // CLI flag defaults
 var (
+	flagDriver             string
 	flagHost               string
 	flagPort               int
 	flagUser               string
@@ -64,6 +65,9 @@ func main() {
 	}
 
 	// Override config with CLI arguments
+	if flagDriver != "" {
+		cfg.Connection.Driver = flagDriver
+	}
 	if flagHost != "" {
 		cfg.Connection.Host = flagHost
 	}
@@ -125,8 +129,12 @@ func main() {
 		cfg.Connection.Port = tunnel.LocalPort()
 	}
 
-	// Step 3: Connect to MySQL
-	fmt.Fprintf(os.Stderr, "Connecting to %s@%s:%d", cfg.Connection.User, cfg.Connection.Host, cfg.Connection.Port)
+	// Step 3: Connect to database
+	driverLabel := "MySQL"
+	if cfg.Connection.Driver == "postgres" || cfg.Connection.Driver == "pg" {
+		driverLabel = "PostgreSQL"
+	}
+	fmt.Fprintf(os.Stderr, "Connecting to %s (%s) %s@%s:%d", driverLabel, cfg.Connection.Driver, cfg.Connection.User, cfg.Connection.Host, cfg.Connection.Port)
 	if cfg.Connection.Database != "" {
 		fmt.Fprintf(os.Stderr, "/%s", cfg.Connection.Database)
 	}
@@ -411,6 +419,11 @@ func parseArgs() error {
 				flagSSHPassword = args[i+1]
 				i++
 			}
+		case "--driver":
+			if i+1 < len(args) {
+				flagDriver = args[i+1]
+				i++
+			}
 		case "--help", "-help":
 			printUsage()
 			os.Exit(0)
@@ -448,14 +461,23 @@ func parseArgs() error {
 //	testdb
 // isDSNArg checks if the argument looks like a DSN connection string
 // rather than a plain database name.
+// Supports both MySQL-style (user:pass@tcp(host:port)/db) and
+// PostgreSQL-style (postgres://user:pass@host:port/db) DSNs.
 func isDSNArg(arg string) bool {
 	return strings.Contains(arg, "@") ||
 		strings.Contains(arg, "/") ||
+		strings.HasPrefix(arg, "postgres://") ||
+		strings.HasPrefix(arg, "postgresql://") ||
 		(strings.Contains(arg, ":") && !strings.HasPrefix(arg, "-"))
 }
 
 func parseDSNArg(dsn string) error {
 	s := dsn
+
+	// Handle PostgreSQL-style URLs: postgres://user:pass@host:port/dbname
+	if strings.HasPrefix(s, "postgres://") || strings.HasPrefix(s, "postgresql://") {
+		return parsePGURL(s)
+	}
 
 	// Extract user:password@ if present
 	if atIdx := strings.LastIndex(s, "@"); atIdx >= 0 {
@@ -543,18 +565,90 @@ func parseDSNArg(dsn string) error {
 	return nil
 }
 
+// parsePGURL parses a PostgreSQL-style URL: postgres://user:pass@host:port/dbname
+func parsePGURL(url string) error {
+	s := url
+
+	// Strip scheme
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+
+	// Set driver
+	flagDriver = "postgres"
+
+	// Extract user:password@
+	if atIdx := strings.LastIndex(s, "@"); atIdx >= 0 {
+		userPart := s[:atIdx]
+		s = s[atIdx+1:]
+
+		if colonIdx := strings.Index(userPart, ":"); colonIdx >= 0 {
+			if flagUser == "" {
+				flagUser = userPart[:colonIdx]
+			}
+			if flagPassword == "" {
+				flagPassword = userPart[colonIdx+1:]
+			}
+		} else {
+			if flagUser == "" {
+				flagUser = userPart
+			}
+		}
+	}
+
+	// Extract /database
+	if slashIdx := strings.Index(s, "/"); slashIdx >= 0 {
+		dbPart := s[slashIdx+1:]
+		s = s[:slashIdx]
+		if dbPart != "" && flagDatabase == "" {
+			flagDatabase = dbPart
+		}
+	}
+
+	// Remaining s is host[:port]
+	if s != "" {
+		if colonIdx := strings.LastIndex(s, ":"); colonIdx >= 0 {
+			hostPart := s[:colonIdx]
+			portPart := s[colonIdx+1:]
+			port := 0
+			fmt.Sscanf(portPart, "%d", &port)
+			if port > 0 {
+				if flagHost == "" {
+					flagHost = hostPart
+				}
+				if flagPort == 0 {
+					flagPort = port
+				}
+			} else {
+				if flagHost == "" {
+					flagHost = s
+				}
+			}
+		} else {
+			if flagHost == "" {
+				flagHost = s
+			}
+		}
+	}
+
+	return nil
+}
+
 // printUsage displays CLI usage information.
 func printUsage() {
-	fmt.Println(`mysh - MySQL CLI with syntax highlighting and auto-completion
+	fmt.Println(`mysh - Database CLI with syntax highlighting and auto-completion
+
+Supports MySQL and PostgreSQL.
 
 Usage:
   mysh [options]
   mysh [options] -e "SQL_STATEMENT"
 
 Options:
-  -h, --host <host>       MySQL host (default: 127.0.0.1)
-  -P, --port <port>       MySQL port (default: 3306)
-  -u, --user <user>       MySQL user (default: root)
+      --driver <type>     Database driver: mysql (default) or postgres
+  -h, --host <host>       Database host (default: 127.0.0.1)
+  -P, --port <port>       Database port (default: 3306 for MySQL, 5432 for PostgreSQL)
+  -u, --user <user>       Database user (default: root)
   -p, --password <pass>   MySQL password
   -D, --database <db>     Default database
   -e, --execute <stmt>    Execute SQL statement and exit
@@ -580,6 +674,8 @@ Configuration:
 Examples:
   mysh -h localhost -u root -p secret -D mydb
   mysh --host db.example.com --port 3307 --user admin
+  mysh --driver postgres -h pg.example.com -u postgres -p secret -D mydb
+  mysh postgres://user:pass@pg.example.com:5432/mydb
   mysh -e "SHOW DATABASES"
   mysh -u root -p secret -e "SELECT * FROM users LIMIT 10"
   mysh -e "SELECT * FROM users" --format markdown
