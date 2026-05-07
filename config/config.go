@@ -35,7 +35,8 @@ type ConnectionConfig struct {
 	Password string `mapstructure:"password"`
 	Database string `mapstructure:"database"`
 	Charset  string `mapstructure:"charset"`
-	Timeout  int    `mapstructure:"timeout"` // connection timeout in seconds (0 = default 30s)
+	SSLMode  string `mapstructure:"ssl_mode"` // PostgreSQL SSL mode: disable, allow, prefer, require, verify-ca, verify-full (default: disable)
+	Timeout  int    `mapstructure:"timeout"`   // connection timeout in seconds (0 = default 30s)
 	SSH      SSHConfig `mapstructure:"ssh"`
 }
 
@@ -103,6 +104,7 @@ type SessionConfig struct {
 	Password string `mapstructure:"password"`
 	Database string `mapstructure:"database"`
 	Charset  string `mapstructure:"charset"`
+	SSLMode  string `mapstructure:"ssl_mode"`
 }
 
 // ToConnectionConfig converts a SessionConfig to a ConnectionConfig.
@@ -128,6 +130,7 @@ func (s SessionConfig) ToConnectionConfig() ConnectionConfig {
 		Password: s.Password,
 		Database: s.Database,
 		Charset:  s.Charset,
+		SSLMode:  s.SSLMode,
 	}
 }
 
@@ -178,12 +181,34 @@ func (c *ConnectionConfig) DSN() string {
 	}
 	switch driver {
 	case "postgres", "pg":
-		dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			c.Host, c.Port, c.User, c.Password, c.Database)
-		if c.Charset != "" {
-			dsn += " client_encoding=" + c.Charset
+		sslMode := c.SSLMode
+		if sslMode == "" {
+			sslMode = "disable"
 		}
-		return dsn
+		// Build DSN with only non-empty fields. An empty value like `dbname=`
+		// can confuse lib/pq's key-value parser and cause subsequent keys
+		// (e.g. sslmode) to be silently dropped.
+		parts := []string{}
+		if c.Host != "" {
+			parts = append(parts, fmt.Sprintf("host=%s", c.Host))
+		}
+		if c.Port > 0 {
+			parts = append(parts, fmt.Sprintf("port=%d", c.Port))
+		}
+		if c.User != "" {
+			parts = append(parts, fmt.Sprintf("user=%s", c.User))
+		}
+		if c.Password != "" {
+			parts = append(parts, fmt.Sprintf("password=%s", c.Password))
+		}
+		if c.Database != "" {
+			parts = append(parts, fmt.Sprintf("dbname=%s", c.Database))
+		}
+		parts = append(parts, fmt.Sprintf("sslmode=%s", sslMode))
+		if c.Charset != "" {
+			parts = append(parts, "client_encoding="+c.Charset)
+		}
+		return strings.Join(parts, " ")
 	default:
 		dsn := c.User + ":" + c.Password + "@tcp(" + c.Host + ":" + itoa(c.Port) + ")/" + c.Database
 		if c.Charset != "" {

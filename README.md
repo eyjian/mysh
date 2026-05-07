@@ -103,6 +103,7 @@ mysh postgres://postgres:password@127.0.0.1:5432/mydb  # PostgreSQL
 | `-u` | `root` | Database user |
 | `-p` | (empty) | Database password |
 | `-d` | (empty) | Default database |
+| `-N` | off | Don't write column names in results |
 | `--config` | `~/.mysh.yaml` | Config file path |
 | `--ssh-host` | — | SSH tunnel host (jump server) |
 | `--ssh-port` | `22` | SSH tunnel port |
@@ -342,41 +343,64 @@ Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syn
 
 | Command | Description |
 |---------|-------------|
-| `\help`, `\h`, `\?` | Show help |
-| `\quit`, `\q` | Exit mysh |
-| `\clear`, `\c` | Clear screen output |
-| `\status`, `\s` | Show connection status |
-| `\use <db>` | Switch database |
-| `\refresh`, `\r` | Refresh metadata cache |
-| `\format [type]` | Set/show output format (table, vertical, json, markdown) |
-| `\history [pattern]` | Search/show command history |
-| `\connect <dsn>` | Connect to a database (user@host:port/db or just db) |
-| `\reconnect` | Reconnect to the current server |
-| `\desc <t> [mode]` | Describe table (columns, full, indexes, create) |
-| `\source <file>` | Execute SQL from file |
-| `\edit`, `\e` | Open external editor to edit/execute SQL |
-| `\pipe`, `\| <cmd>` | Pipe last query result to a system command |
-| `\copy <what>` | Copy to clipboard (result, query, sql) |
-| `\timing` | Toggle query execution time display |
-| `\safe-updates [on\|off]` | Toggle safe-updates mode (block UPDATE/DELETE without WHERE/LIMIT) |
-| `\slow [seconds]` | Set/show slow query warning threshold (0 = disabled) |
-| `\export <file> [fmt]` | Export last query result to file (csv, json, markdown) |
-| `\watch [sec] [SQL]` | Re-execute query at intervals (default 5s, Ctrl+C stop) |
 | `\alias [name sql]` | Show/set command aliases |
-| `\unalias <name>` | Remove temporary alias |
-| `\session` | List saved sessions |
-| `\session <name>` | Switch to saved session |
-| `\session save <name>` | Save current connection as session |
-| `\session del <name>` | Delete a saved session |
+| `\cd [dir]` | Change/show working directory (for \source, \sys) |
+| `\clear`, `\c` | Clear screen output |
+| `\connect <dsn>` | Connect to a database (user@host:port/db or just db) |
+| `\conninfo` | Show detailed connection info (host, port, user, driver) |
+| `\copy <what>` | Copy to clipboard (result, query, sql) |
+| `\desc <t> [mode]` | Describe table (no arg = list tables; columns, full, indexes, create) |
+| `\di [table]`, `\indexes` | List indexes (optional table filter) |
+| `\dn`, `\schemas` | List schemas (MySQL: databases, PostgreSQL: schemas) |
+| `\dt [pattern]`, `\tables` | List tables (optional pattern: user* or user%) |
+| `\du`, `\users` | List database users |
+| `\dv [pattern]`, `\views` | List views (optional pattern) |
+| `\echo <text>` | Echo text to output |
+| `\edit`, `\e` | Open external editor to edit/execute SQL |
+| `\encoding [name]` | Show/set client character encoding |
+| `\explain [analyze] <sql>` | Run EXPLAIN on SQL (add analyze to execute) |
+| `\export <file> [fmt]` | Export last query result to file (csv, json, markdown) |
 | `\fav`, `\favorites` | List favorite queries |
 | `\fav <name>` | Execute a saved favorite |
 | `\fav + <name> [desc]` | Save last query as favorite |
 | `\fav - <name>` | Delete a favorite |
 | `\fav show <name>` | Show favorite SQL |
+| `\format [type]` | Set/show output format (table, vertical, json, markdown) |
+| `\g [file]` | Execute last query, optionally save to file |
+| `\get <name>` | Show session variable value |
+| `\gx` | Execute last query with vertical output |
+| `\help`, `\h`, `\?` | Show help |
+| `\history [pattern]` | Search/show command history |
+| `\l`, `\list`, `\databases` | List all databases |
 | `\mouse` | Toggle mouse mode |
-| `\cd [dir]` | Change/show working directory (for \source, \sys) |
-| `\sys`, `\! <cmd>` | Execute a system command |
+| `\pipe`, `\| <cmd>` | Pipe last query result to a system command |
+| `\privileges <t>` | Show table privileges |
+| `\prompt <var> [text]` | Prompt for input (stores into variable) |
+| `\pset [opt [val]]` | Control output details. Options: `expanded [on\|off\|auto]`, `format [table\|vertical\|json\|markdown]`, `header [on\|off]`, `null [string]`, `pager`, `title [text\|off]` |
+| `\quit`, `\q`, `quit`, `exit` | Exit mysh |
+| `\reconnect` | Reconnect to the current server |
+| `\refresh`, `\r` | Refresh metadata cache |
 | `\rollback` | Rollback current transaction |
+| `\safe-updates [on\|off]` | Toggle safe-updates mode (block UPDATE/DELETE without WHERE/LIMIT) |
+| `\session` | List saved sessions |
+| `\session <name>` | Switch to saved session |
+| `\session save <name>` | Save current connection as session |
+| `\session del <name>` | Delete a saved session |
+| `\sf <func>` | Show function definition |
+| `\set [name value]` | Show/set session variables |
+| `\slow [seconds]` | Set/show slow query warning threshold (0 = disabled) |
+| `\source <file>` | Execute SQL from file |
+| `\status`, `\s` | Show connection status |
+| `\sys`, `\! <cmd>` | Execute a system command |
+| `\T [title\|off]` | Set/clear result title |
+| `\timing` | Toggle query execution time display |
+| `\unalias <name>` | Remove temporary alias |
+| `\unset <name>` | Remove session variable |
+| `\use <db>` | Switch database |
+| `\verbose` | Toggle verbose mode (show full error details) |
+| `\warn [on\|off]` | Toggle warning display |
+| `\watch [sec] [SQL]` | Re-execute query at intervals (default 5s, Ctrl+C stop) |
+| `\x`, `\expanded` | Toggle expanded (vertical) output mode |
 
 ### Format Suffixes
 

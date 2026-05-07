@@ -49,6 +49,8 @@ var (
 	flagSSHUser            string
 	flagSSHKey             string
 	flagSSHPassword        string
+	flagSSLMode            string
+	flagSkipColumnNames    bool
 )
 
 func main() {
@@ -85,6 +87,9 @@ func main() {
 	}
 	if flagCharset != "" {
 		cfg.Connection.Charset = flagCharset
+	}
+	if flagSSLMode != "" {
+		cfg.Connection.SSLMode = flagSSLMode
 	}
 	if flagPageSize >= 0 {
 		cfg.UI.PageSize = flagPageSize
@@ -169,6 +174,7 @@ func main() {
 
 	// Apply safety settings from config and CLI flags
 	if cfg.Safety.SafeUpdates || flagSafeUpdates {
+		cfg.Safety.SafeUpdates = true
 		exec.SetSafeUpdates(true)
 	}
 	if flagSlowThreshold >= 0 {
@@ -235,6 +241,11 @@ func main() {
 	}
 
 	model := tui.NewModel(deps)
+
+	// Apply CLI flags that affect model state
+	if flagSkipColumnNames {
+		model.SetShowHeader(false)
+	}
 	program := tea.NewProgram(model, tea.WithContext(ctx))
 
 	// Async: load metadata cache in background so TUI starts immediately
@@ -424,6 +435,13 @@ func parseArgs() error {
 				flagDriver = args[i+1]
 				i++
 			}
+		case "--ssl-mode":
+			if i+1 < len(args) {
+				flagSSLMode = args[i+1]
+				i++
+			}
+		case "-N", "--skip-column-names":
+			flagSkipColumnNames = true
 		case "--help", "-help":
 			printUsage()
 			os.Exit(0)
@@ -641,16 +659,18 @@ func printUsage() {
 Supports MySQL and PostgreSQL.
 
 Usage:
-  mysh [options]
+  mysh [options] [database]
   mysh [options] -e "SQL_STATEMENT"
 
 Options:
       --driver <type>     Database driver: mysql (default) or postgres
+      --ssl-mode <mode>  SSL mode for PostgreSQL: disable, allow, prefer, require, verify-ca, verify-full (default: disable)
   -h, --host <host>       Database host (default: 127.0.0.1)
   -P, --port <port>       Database port (default: 3306 for MySQL, 5432 for PostgreSQL)
   -u, --user <user>       Database user (default: root)
   -p, --password <pass>   MySQL password
   -D, --database <db>     Default database
+  -N, --skip-column-names  Don't write column names in results
   -e, --execute <stmt>    Execute SQL statement and exit
       --format <type>     Output format: table|vertical|json|markdown
       --default-character-set <name> Set the default character set
@@ -673,6 +693,7 @@ Configuration:
 
 Examples:
   mysh -h localhost -u root -p secret -D mydb
+  mysh -h localhost -u root -p secret mydb
   mysh --host db.example.com --port 3307 --user admin
   mysh --driver postgres -h pg.example.com -u postgres -p secret -D mydb
   mysh postgres://user:pass@pg.example.com:5432/mydb
@@ -682,6 +703,7 @@ Examples:
   mysh -e "SHOW TABLES" --format json
   mysh --default-character-set utf8mb4
   mysh -U --slow-threshold 5
+  mysh -N -e "SELECT * FROM users"
   mysh -h 10.0.0.5 --ssh-host jump.example.com --ssh-user deploy
   mysh -h db.internal --ssh-host bastion --ssh-key ~/.ssh/id_ed25519`)
 }

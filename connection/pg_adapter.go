@@ -14,13 +14,59 @@ func (pgAdapter) DriverName() string { return "postgres" }
 
 func (pgAdapter) DefaultPort() int { return 5432 }
 
-func (pgAdapter) DSN(host string, port int, user, password, database, charset string) string {
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-		host, port, user, password, database)
-	if charset != "" {
-		dsn += " client_encoding=" + charset
+func (pgAdapter) DSN(host string, port int, user, password, database, charset, sslMode string) string {
+	if sslMode == "" {
+		sslMode = "disable"
 	}
-	return dsn
+	// Build DSN with only non-empty fields. An empty value (e.g. `dbname=`) can
+	// confuse lib/pq's key-value parser and cause subsequent keys like sslmode
+	// to be silently dropped, falling back to the default `require`.
+	parts := []string{}
+	if host != "" {
+		parts = append(parts, fmt.Sprintf("host=%s", host))
+	}
+	if port > 0 {
+		parts = append(parts, fmt.Sprintf("port=%d", port))
+	}
+	if user != "" {
+		parts = append(parts, fmt.Sprintf("user=%s", user))
+	}
+	if password != "" {
+		parts = append(parts, fmt.Sprintf("password=%s", pgQuoteValue(password)))
+	}
+	if database != "" {
+		parts = append(parts, fmt.Sprintf("dbname=%s", database))
+	}
+	parts = append(parts, fmt.Sprintf("sslmode=%s", sslMode))
+	if charset != "" {
+		parts = append(parts, "client_encoding="+charset)
+	}
+	return strings.Join(parts, " ")
+}
+
+// pgQuoteValue wraps a value in single quotes if it contains spaces or quote
+// characters, escaping embedded quotes/backslashes per libpq rules.
+func pgQuoteValue(s string) string {
+	needQuote := false
+	for _, c := range s {
+		if c == ' ' || c == '\'' || c == '\\' {
+			needQuote = true
+			break
+		}
+	}
+	if !needQuote {
+		return s
+	}
+	var b strings.Builder
+	b.WriteByte('\'')
+	for _, c := range s {
+		if c == '\'' || c == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(c)
+	}
+	b.WriteByte('\'')
+	return b.String()
 }
 
 func (pgAdapter) QuoteIdentifier(name string) string {
@@ -311,4 +357,174 @@ func (pgAdapter) IsConnectionError(err error) bool {
 		strings.Contains(msg, "conn closed") ||
 		strings.Contains(msg, "connection unexpectedly closed") ||
 		strings.Contains(msg, "no such host")
+}
+
+func (pgAdapter) Schemas(db *sql.DB) ([]string, error) {
+	rows, err := db.Query("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast') ORDER BY schema_name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var schemas []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		schemas = append(schemas, name)
+	}
+	return schemas, rows.Err()
+}
+
+func (pgAdapter) Users(db *sql.DB) ([]string, error) {
+	rows, err := db.Query("SELECT usename FROM pg_user ORDER BY usename")
+	if err != nil {
+		// Fallback: just show current user
+		var user string
+		if err := db.QueryRow("SELECT current_user").Scan(&user); err != nil {
+			return nil, err
+		}
+		return []string{user}, nil
+	}
+	defer rows.Close()
+
+	var users []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		users = append(users, name)
+	}
+	return users, rows.Err()
+}
+
+func (pgAdapter) Views(db *sql.DB, schema string) ([]string, error) {
+	if schema == "" {
+		schema = "public"
+	}
+	rows, err := db.Query("SELECT viewname FROM pg_views WHERE schemaname = $1 ORDER BY viewname", schema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		views = append(views, name)
+	}
+	return views, rows.Err()
+}
+
+func (pgAdapter) ShowFunction(db *sql.DB, schema, function string) (string, error) {
+	if schema == "" {
+		schema = "public"
+	}
+	var def string
+	err := db.QueryRow("SELECT pg_get_functiondef(oid) FROM pg_proc WHERE proname = $1 AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = $2)", function, schema).Scan(&def)
+	if err != nil {
+		return "", fmt.Errorf("function %s not found: %w", function, err)
+	}
+	return def, nil
+}
+
+func (pgAdapter) TablePrivileges(db *sql.DB, schema, table string) ([]string, error) {
+	if schema == "" {
+		schema = "public"
+	}
+	rows, err := db.Query(`SELECT grantee, string_agg(privilege_type, ', ' ORDER BY privilege_type) as privileges
+		FROM information_schema.role_table_grants
+		WHERE table_schema = $1 AND table_name = $2
+		GROUP BY grantee ORDER BY grantee`, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var privileges []string
+	for rows.Next() {
+		var grantee, privs string
+		if err := rows.Scan(&grantee, &privs); err != nil {
+			return nil, err
+		}
+		privileges = append(privileges, fmt.Sprintf("%s: %s", grantee, privs))
+	}
+	return privileges, rows.Err()
+}
+
+func (pgAdapter) ListIndexes(db *sql.DB, schema, table string) ([]TableIndexInfo, error) {
+	if schema == "" {
+		schema = "public"
+	}
+	var query string
+	var args []interface{}
+	if table != "" {
+		query = `SELECT i.relname as index_name,
+		                a.attname as column_name,
+		                NOT ix.indisunique as non_unique,
+		                am.amname as index_type,
+		                t.relname as table_name
+		         FROM pg_class t
+		         JOIN pg_namespace n ON n.oid = t.relnamespace
+		         JOIN pg_index ix ON ix.indrelid = t.oid
+		         JOIN pg_class i ON i.oid = ix.indexrelid
+		         JOIN pg_am am ON am.oid = i.relam
+		         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+		         WHERE n.nspname = $1 AND t.relname = $2
+		         ORDER BY i.relname, a.attnum`
+		args = []interface{}{schema, table}
+	} else {
+		query = `SELECT i.relname as index_name,
+		                a.attname as column_name,
+		                NOT ix.indisunique as non_unique,
+		                am.amname as index_type,
+		                t.relname as table_name
+		         FROM pg_class t
+		         JOIN pg_namespace n ON n.oid = t.relnamespace
+		         JOIN pg_index ix ON ix.indrelid = t.oid
+		         JOIN pg_class i ON i.oid = ix.indexrelid
+		         JOIN pg_am am ON am.oid = i.relam
+		         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+		         WHERE n.nspname = $1
+		         ORDER BY t.relname, i.relname, a.attnum`
+		args = []interface{}{schema}
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var indexes []TableIndexInfo
+	for rows.Next() {
+		var name, colName, idxType, tblName string
+		var nonUnique bool
+		if err := rows.Scan(&name, &colName, &nonUnique, &idxType, &tblName); err != nil {
+			return nil, err
+		}
+		indexes = append(indexes, TableIndexInfo{
+			Name:      tblName + "." + name,
+			Columns:   colName,
+			NonUnique: nonUnique,
+			Type:      idxType,
+		})
+	}
+	return indexes, rows.Err()
+}
+
+func (pgAdapter) SetEncoding(db *sql.DB, encoding string) error {
+	_, err := db.Exec(fmt.Sprintf("SET client_encoding = '%s'", encoding))
+	return err
+}
+
+func (pgAdapter) GetEncoding(db *sql.DB) (string, error) {
+	var value string
+	err := db.QueryRow("SELECT current_setting('client_encoding')").Scan(&value)
+	return value, err
 }

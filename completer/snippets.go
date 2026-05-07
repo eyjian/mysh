@@ -67,6 +67,36 @@ func BuiltInSnippets() []Snippet {
 			Template:    "CREATE INDEX index_name ON table_name (column)",
 			Context:     "statement",
 		},
+		{
+			Trigger:     "create_user",
+			Description: "CREATE USER template",
+			Template:    "CREATE USER 'username'@'host' IDENTIFIED BY 'password'",
+			Context:     "statement",
+		},
+		{
+			Trigger:     "grant",
+			Description: "GRANT privileges template",
+			Template:    "GRANT SELECT, INSERT ON database.table TO 'user'@'host'",
+			Context:     "statement",
+		},
+		{
+			Trigger:     "select_into",
+			Description: "SELECT INTO OUTFILE template",
+			Template:    "SELECT columns INTO OUTFILE '/tmp/file.csv' FIELDS TERMINATED BY ',' FROM table_name",
+			Context:     "statement",
+		},
+		{
+			Trigger:     "right",
+			Description: "RIGHT JOIN template",
+			Template:    "RIGHT JOIN table_name ON condition",
+			Context:     "after_from",
+		},
+		{
+			Trigger:     "cross",
+			Description: "CROSS JOIN template",
+			Template:    "CROSS JOIN table_name",
+			Context:     "after_from",
+		},
 	}
 }
 

@@ -99,6 +99,7 @@ mysh postgres://postgres:password@127.0.0.1:5432/mydb  # PostgreSQL
 | `-u` | `root` | 数据库用户 |
 | `-p` | (空) | 数据库密码 |
 | `-d` | (空) | 默认数据库 |
+| `-N` | 关 | 不在结果中显示列名 |
 | `--config` | `~/.mysh.yaml` | 配置文件路径 |
 | `--version` | — | 打印版本号 |
 | `--help` | — | 打印帮助信息 |
@@ -290,41 +291,64 @@ sessions:
 
 | 命令 | 说明 |
 |------|------|
-| `\help`, `\h`, `\?` | 显示帮助 |
-| `\quit`, `\q` | 退出 mysh |
-| `\clear`, `\c` | 清屏 |
-| `\status`, `\s` | 显示连接状态 |
-| `\use <db>` | 切换数据库 |
-| `\refresh`, `\r` | 刷新元数据缓存 |
-| `\format [type]` | 设置/查看输出格式（table, vertical, json, markdown） |
-| `\history [pattern]` | 搜索/查看命令历史 |
-| `\connect <dsn>` | 连接数据库（user@host:port/db 或仅 db） |
-| `\reconnect` | 重新连接当前服务器 |
-| `\desc <t> [mode]` | 查看表结构（columns, full, indexes, create） |
-| `\source <file>` | 从文件执行 SQL |
-| `\edit`, `\e` | 打开外部编辑器编辑/执行 SQL |
-| `\pipe`, `\| <cmd>` | 将查询结果管道到系统命令 |
-| `\copy <what>` | 复制到剪贴板（result, query, sql） |
-| `\timing` | 切换查询执行耗时显示 |
-| `\safe-updates [on\|off]` | 切换安全更新模式（阻止没有 WHERE/LIMIT 的 UPDATE/DELETE） |
-| `\slow [seconds]` | 设置/查看慢查询警告阈值（0 = 禁用） |
-| `\export <file> [fmt]` | 导出最后一次查询结果到文件（csv, json, markdown） |
-| `\watch [秒] [SQL]` | 定期重执行查询（默认 5 秒，Ctrl+C 停止） |
 | `\alias [name sql]` | 查看/设置命令别名 |
-| `\unalias <name>` | 删除临时别名 |
-| `\session` | 列出已保存会话 |
-| `\session <name>` | 切换到已保存会话 |
-| `\session save <name>` | 保存当前连接为会话 |
-| `\session del <name>` | 删除已保存会话 |
+| `\cd [dir]` | 切换/查看工作目录（用于 \source、\sys） |
+| `\clear`, `\c` | 清屏 |
+| `\connect <dsn>` | 连接数据库（user@host:port/db 或仅 db） |
+| `\conninfo` | 显示详细连接信息（主机、端口、用户、驱动） |
+| `\copy <what>` | 复制到剪贴板（result, query, sql） |
+| `\desc <t> [mode]` | 查看表结构（无参数=列出表；columns, full, indexes, create） |
+| `\di [table]`, `\indexes` | 列出索引（可选表名过滤） |
+| `\dn`, `\schemas` | 列出模式（MySQL: 数据库，PostgreSQL: schemas） |
+| `\dt [pattern]`, `\tables` | 列出表（支持模式匹配：user\* 或 user%） |
+| `\du`, `\users` | 列出数据库用户 |
+| `\dv [pattern]`, `\views` | 列出视图（支持模式匹配） |
+| `\echo <text>` | 输出文本到界面 |
+| `\edit`, `\e` | 打开外部编辑器编辑/执行 SQL |
+| `\encoding [name]` | 查看/设置客户端字符编码 |
+| `\explain [analyze] <sql>` | 执行 EXPLAIN（加 analyze 则实际运行） |
+| `\export <file> [fmt]` | 导出最后一次查询结果到文件（csv, json, markdown） |
 | `\fav`, `\favorites` | 列出收藏查询 |
 | `\fav <name>` | 执行已收藏的查询 |
 | `\fav + <name> [desc]` | 将最后一次查询保存为收藏 |
 | `\fav - <name>` | 删除收藏 |
 | `\fav show <name>` | 查看收藏的 SQL |
+| `\format [type]` | 设置/查看输出格式（table, vertical, json, markdown） |
+| `\g [file]` | 执行上次查询，可选保存到文件 |
+| `\get <name>` | 查看会话变量值 |
+| `\gx` | 以垂直格式执行上次查询 |
+| `\help`, `\h`, `\?` | 显示帮助 |
+| `\history [pattern]` | 搜索/查看命令历史 |
+| `\l`, `\list`, `\databases` | 列出所有数据库 |
 | `\mouse` | 切换鼠标模式 |
-| `\cd [dir]` | 切换/查看工作目录（用于 \source、\sys） |
-| `\sys`, `\! <cmd>` | 执行系统命令 |
+| `\pipe`, `\| <cmd>` | 将查询结果管道到系统命令 |
+| `\privileges <t>` | 查看表权限 |
+| `\prompt <var> [text]` | 交互式输入（存储到变量） |
+| `\pset [opt [val]]` | 控制输出细节。选项：`expanded [on\|off\|auto]`、`format [table\|vertical\|json\|markdown]`、`header [on\|off]`、`null [string]`、`pager`、`title [text\|off]` |
+| `\quit`, `\q`, `quit`, `exit` | 退出 mysh |
+| `\reconnect` | 重新连接当前服务器 |
+| `\refresh`, `\r` | 刷新元数据缓存 |
 | `\rollback` | 回滚当前事务 |
+| `\safe-updates [on\|off]` | 切换安全更新模式（阻止没有 WHERE/LIMIT 的 UPDATE/DELETE） |
+| `\session` | 列出已保存会话 |
+| `\session <name>` | 切换到已保存会话 |
+| `\session save <name>` | 保存当前连接为会话 |
+| `\session del <name>` | 删除已保存会话 |
+| `\sf <func>` | 显示函数定义 |
+| `\set [name value]` | 查看/设置会话变量 |
+| `\slow [seconds]` | 设置/查看慢查询警告阈值（0 = 禁用） |
+| `\source <file>` | 从文件执行 SQL |
+| `\status`, `\s` | 显示连接状态 |
+| `\sys`, `\! <cmd>` | 执行系统命令 |
+| `\T [title\|off]` | 设置/清除结果标题 |
+| `\timing` | 切换查询执行耗时显示 |
+| `\unalias <name>` | 删除临时别名 |
+| `\unset <name>` | 删除会话变量 |
+| `\use <db>` | 切换数据库 |
+| `\verbose` | 切换详细模式（显示完整错误信息） |
+| `\warn [on\|off]` | 切换警告显示 |
+| `\watch [秒] [SQL]` | 定期重执行查询（默认 5 秒，Ctrl+C 停止） |
+| `\x`, `\expanded` | 切换垂直/表格输出模式 |
 
 ### 格式后缀
 

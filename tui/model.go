@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -125,6 +126,21 @@ type Model struct {
 	// Working directory (for \cd and \sys)
 	workDir string
 
+	// Session variables (for \set / \get)
+	sessionVars map[string]string
+
+	// Result title (for \T)
+	resultTitle string
+
+	// Show column header (for \pset header)
+	showHeader bool
+
+	// Verbose mode (for \verbose)
+	verboseMode bool
+
+	// Show warnings (for \warn)
+	showWarnings bool
+
 	// Styles
 	promptStyle lipgloss.Style
 	outputStyle lipgloss.Style
@@ -151,6 +167,10 @@ func NewModel(deps Dependencies) Model {
 		connected:           true,
 		safeUpdates:         deps.Config.Safety.SafeUpdates,
 		showTiming:          true,
+		showHeader:          true,
+		sessionVars:         make(map[string]string),
+		verboseMode:        false,
+		showWarnings:       true,
 		workDir:             "", // will be set on first prompt
 		promptStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
 		outputStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
@@ -788,6 +808,21 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Check for pending prompt capture (from \prompt command)
+	if m.sessionVars != nil {
+		if varName, ok := m.sessionVars["__prompt_var"]; ok && strings.TrimSpace(input) != "" {
+			delete(m.sessionVars, "__prompt_var")
+			trimmedInput := strings.TrimSpace(input)
+			// Don't capture backslash commands as prompt input
+			if !strings.HasPrefix(trimmedInput, "\\") {
+				m.sessionVars[varName] = trimmedInput
+				m.addOutput(fmt.Sprintf("  %s = %s", varName, trimmedInput))
+				m.ed.Clear()
+				return m, nil
+			}
+		}
+	}
+
 	// Check for backslash commands
 	trimmed := strings.TrimSpace(input)
 	if strings.HasPrefix(trimmed, "\\") {
@@ -863,6 +898,9 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 	m.addOutput(m.prompt + cmd)
 	m.ed.Clear()
 	m.multiline = false
+
+	// Save to history so Up/Down can recall backslash commands
+	// (done after command processing to avoid current command appearing in \history)
 	parts := strings.Fields(cmd)
 	command := parts[0]
 
@@ -878,6 +916,7 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 	switch command {
 	case "\\quit", "\\q":
 		m.rollbackIfInTransaction()
+		m.deps.History.Append(strings.TrimSpace(cmd))
 		m.quitting = true
 		return m, tea.Quit
 
@@ -998,11 +1037,8 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 
 	case "\\desc", "\\d":
 		if len(parts) < 2 {
-			m.addOutput("Usage: \\desc <table> [columns|indexes|create|full]")
-			m.addOutput("  columns  Column list (default)")
-			m.addOutput("  full     Full column info (type, nullable, key, default, extra)")
-			m.addOutput("  indexes  Index information")
-			m.addOutput("  create   SHOW CREATE TABLE")
+			// \d without arguments lists tables (psql behavior)
+			m.handleListTables("")
 		} else {
 			m.handleDesc(parts[1:])
 		}
@@ -1035,8 +1071,10 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "\\watch":
 		if m.executing || m.watching {
 			m.addOutput("A query or watch is already running.")
+			m.deps.History.Append(strings.TrimSpace(cmd))
 			return m, nil
 		}
+		m.deps.History.Append(strings.TrimSpace(cmd))
 		return m.handleWatch(parts[1:])
 
 	case "\\alias":
@@ -1126,6 +1164,7 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 
 	case "\\edit", "\\e":
+		m.deps.History.Append(strings.TrimSpace(cmd))
 		return m.handleEdit()
 
 	case "\\pipe", "\\|":
@@ -1237,9 +1276,158 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.handleSys([]string{sysCmd})
 		}
 
+	case "\\l", "\\list", "\\databases":
+		m.handleListDatabases()
+
+	case "\\dt", "\\tables":
+		var pattern string
+		if len(parts) >= 2 {
+			pattern = parts[1]
+		}
+		m.handleListTables(pattern)
+
+	case "\\echo":
+		text := strings.TrimSpace(strings.TrimPrefix(cmd, command))
+		m.addOutput(text)
+
+	case "\\conninfo":
+		m.addOutput(m.formatConnInfo())
+
+	case "\\x", "\\expanded":
+		m.autoVerticalOutput = !m.autoVerticalOutput
+		if m.autoVerticalOutput {
+			m.addOutput("Expanded display is on.")
+		} else {
+			m.addOutput("Expanded display is off.")
+		}
+
+	case "\\dn", "\\schemas":
+		m.handleListSchemas()
+
+	case "\\du", "\\users":
+		m.handleListUsers()
+
+	case "\\di", "\\indexes":
+		var table string
+		if len(parts) >= 2 {
+			table = parts[1]
+		}
+		m.handleListIndexes(table)
+
+	case "\\dv", "\\views":
+		var pattern string
+		if len(parts) >= 2 {
+			pattern = parts[1]
+		}
+		m.handleListViews(pattern)
+
+	case "\\set":
+		m.handleSet(parts[1:])
+
+	case "\\get":
+		m.handleGet(parts[1:])
+
+	case "\\unset":
+		if len(parts) < 2 {
+			m.addOutput("Usage: \\unset <name>")
+		} else {
+			delete(m.sessionVars, parts[1])
+			m.addOutput(fmt.Sprintf("Variable %s unset.", parts[1]))
+		}
+
+	case "\\prompt":
+		m.handlePrompt(parts[1:])
+
+	case "\\pset":
+		m.handlePset(parts[1:])
+
+	case "\\T":
+		if len(parts) < 2 {
+			if m.resultTitle != "" {
+				m.addOutput(fmt.Sprintf("Result title: %s", m.resultTitle))
+			} else {
+				m.addOutput("No result title set.")
+			}
+		} else if parts[1] == "off" || parts[1] == "-" {
+			m.resultTitle = ""
+			m.addOutput("Result title cleared.")
+		} else {
+			m.resultTitle = strings.Join(parts[1:], " ")
+			m.addOutput(fmt.Sprintf("Result title set to: %s", m.resultTitle))
+		}
+
+	case "\\g":
+		m.handleG(parts[1:])
+
+	case "\\gx":
+		// Execute current input or last query with vertical output
+		sql := strings.TrimSpace(m.ed.Text())
+		if sql == "" && m.lastQuery != "" {
+			sql = m.lastQuery
+		}
+		if sql == "" {
+			m.addOutput("No query to execute.")
+		} else {
+			m.ed.Clear()
+			return m.executeInput(sql, output.FormatVertical)
+		}
+
+	case "\\encoding":
+		m.handleEncoding(parts[1:])
+
+	case "\\sf":
+		if len(parts) < 2 {
+			m.addOutput("Usage: \\sf <function_name>")
+		} else {
+			m.handleShowFunction(parts[1])
+		}
+
+	case "\\privileges":
+		if len(parts) < 2 {
+			m.addOutput("Usage: \\privileges <table>")
+		} else {
+			m.handlePrivileges(parts[1])
+		}
+
+	case "\\verbose":
+		m.verboseMode = !m.verboseMode
+		if m.verboseMode {
+			m.addOutput("Verbose mode is on.")
+		} else {
+			m.addOutput("Verbose mode is off.")
+		}
+
+	case "\\warn":
+		if len(parts) >= 2 {
+			switch strings.ToLower(parts[1]) {
+			case "on", "1", "true":
+				m.showWarnings = true
+				m.addOutput("Warnings are on.")
+			case "off", "0", "false":
+				m.showWarnings = false
+				m.addOutput("Warnings are off.")
+			default:
+				m.addOutput("Usage: \\warn [on|off]")
+			}
+		} else {
+			m.showWarnings = !m.showWarnings
+			if m.showWarnings {
+				m.addOutput("Warnings are on.")
+			} else {
+				m.addOutput("Warnings are off.")
+			}
+		}
+
+	case "\\explain":
+		m.deps.History.Append(strings.TrimSpace(cmd))
+		return m.handleExplainCmd(parts[1:])
+
 	default:
 		m.addOutput(fmt.Sprintf("Unknown command: %s. Type \\help for available commands.", command))
 	}
+
+	// Save to history so Up/Down can recall backslash commands
+	m.deps.History.Append(strings.TrimSpace(cmd))
 
 	return m, nil
 }
@@ -1421,6 +1609,9 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 		if _, ok := err.(*executor.SafeUpdateError); ok {
 			m.addOutput(fmt.Sprintf("\033[33m⚠ %s\033[0m", errMsg))
 			m.addOutput(fmt.Sprintf("\033[2mHint: Use \\safe-updates to toggle, or add WHERE/LIMIT clause.\033[0m"))
+		} else if m.verboseMode {
+			// Verbose mode: show full error with type info
+			m.addOutput(fmt.Sprintf("\033[31mERROR (%T):\033[0m %s", err, errMsg))
 		} else {
 			m.addOutput(fmt.Sprintf("%s", errMsg))
 		}
@@ -1458,9 +1649,14 @@ func (m *Model) displayQueryResult(result *executor.QueryResult, err error, form
 	}
 
 	// Format result (no column truncation — data should never be cut off)
+	// Show result title if set (via \T)
+	if m.resultTitle != "" {
+		m.addOutput(m.resultTitle)
+	}
 	var buf strings.Builder
 	formatter := output.NewFormatter(outFmt, &buf)
 	formatter.SetShowTiming(m.showTiming)
+	formatter.SetShowHeader(m.showHeader)
 	if writeErr := formatter.WriteResult(result); writeErr != nil {
 		m.addOutput(fmt.Sprintf("Output error: %s", writeErr))
 	}
@@ -2436,6 +2632,578 @@ func (m Model) runFavorite(name string) (tea.Model, tea.Cmd) {
 	return m.executeInput(fav.SQL, output.FormatTable)
 }
 
+// handleListDatabases lists all databases (like psql's \l or MySQL's SHOW DATABASES).
+func (m *Model) handleListDatabases() {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+	dbs, err := m.deps.Pool.Databases()
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		return
+	}
+	if len(dbs) == 0 {
+		m.addOutput("No databases found.")
+		return
+	}
+	m.addOutput(fmt.Sprintf("  List of databases (%d):", len(dbs)))
+	for _, db := range dbs {
+		m.addOutput(fmt.Sprintf("   %s", db))
+	}
+}
+
+// handleListTables lists tables in the current database, optionally filtered by pattern.
+func (m *Model) handleListTables(pattern string) {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+	db := m.deps.Pool.CurrentDB()
+	tables, err := m.deps.Pool.Tables(db)
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		return
+	}
+
+	// Filter by pattern if provided
+	if pattern != "" {
+		// Convert SQL-style % wildcard to glob * for matching
+		globPattern := strings.ReplaceAll(pattern, "%", "*")
+		var filtered []string
+		for _, t := range tables {
+			matched, _ := filepath.Match(globPattern, t)
+			if matched {
+				filtered = append(filtered, t)
+			}
+		}
+		// If no glob match, try case-insensitive prefix match for usability
+		if len(filtered) == 0 {
+			prefix := strings.TrimRight(pattern, "*%")
+			if prefix != "" {
+				for _, t := range tables {
+					if strings.HasPrefix(strings.ToLower(t), strings.ToLower(prefix)) {
+						filtered = append(filtered, t)
+					}
+				}
+			}
+		}
+		tables = filtered
+	}
+
+	if len(tables) == 0 {
+		if pattern != "" {
+			m.addOutput(fmt.Sprintf("No tables found matching %q in database %q.", pattern, db))
+		} else {
+			m.addOutput(fmt.Sprintf("No tables found in database %q.", db))
+		}
+		return
+	}
+
+	label := fmt.Sprintf("  List of relations (%d) in %s:", len(tables), db)
+	if pattern != "" {
+		label = fmt.Sprintf("  List of relations (%d) matching %q in %s:", len(tables), pattern, db)
+	}
+	m.addOutput(label)
+	for _, t := range tables {
+		m.addOutput(fmt.Sprintf("   %s", t))
+	}
+}
+
+// formatConnInfo returns detailed connection information (like psql's \conninfo).
+func (m Model) formatConnInfo() string {
+	if m.deps.Pool == nil || m.deps.Config == nil {
+		return "No connection."
+	}
+	cfg := m.deps.Config.Connection
+	db := m.deps.Pool.CurrentDB()
+
+	driverLabel := cfg.Driver
+	if driverLabel == "" {
+		driverLabel = "mysql"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("You are connected to database %q", db))
+	sb.WriteString(fmt.Sprintf(" as user %q", cfg.User))
+	sb.WriteString(fmt.Sprintf(" on host %q", cfg.Host))
+	sb.WriteString(fmt.Sprintf(" at port %q", fmt.Sprintf("%d", cfg.Port)))
+	sb.WriteString(fmt.Sprintf(" via driver %q", driverLabel))
+	if m.deps.SSHTunnel != nil {
+		sb.WriteString(fmt.Sprintf(" (SSH tunnel: %s)", m.deps.SSHTunnel.LocalAddr()))
+	}
+	sb.WriteString(".")
+	return sb.String()
+}
+
+// handleListSchemas lists schemas (MySQL: databases, PostgreSQL: schemas).
+func (m *Model) handleListSchemas() {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+	schemas, err := m.deps.Pool.Schemas()
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		return
+	}
+	if len(schemas) == 0 {
+		m.addOutput("No schemas found.")
+		return
+	}
+	m.addOutput(fmt.Sprintf("  List of schemas (%d):", len(schemas)))
+	for _, s := range schemas {
+		m.addOutput(fmt.Sprintf("   %s", s))
+	}
+}
+
+// handleListUsers lists database users.
+func (m *Model) handleListUsers() {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+	users, err := m.deps.Pool.Users()
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		return
+	}
+	if len(users) == 0 {
+		m.addOutput("No users found.")
+		return
+	}
+	m.addOutput(fmt.Sprintf("  List of users (%d):", len(users)))
+	for _, u := range users {
+		m.addOutput(fmt.Sprintf("   %s", u))
+	}
+}
+
+// handleListIndexes lists index information, optionally filtered by table.
+func (m *Model) handleListIndexes(table string) {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+	db := m.deps.Pool.CurrentDB()
+	indexes, err := m.deps.Pool.ListIndexes(db, table)
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		return
+	}
+	if len(indexes) == 0 {
+		if table != "" {
+			m.addOutput(fmt.Sprintf("No indexes found for table %q.", table))
+		} else {
+			m.addOutput("No indexes found.")
+		}
+		return
+	}
+
+	// Group by index name
+	type idxGroup struct {
+		name      string
+		columns   []string
+		nonUnique bool
+		idxType   string
+	}
+	groups := make(map[string]*idxGroup)
+	var order []string
+	for _, idx := range indexes {
+		if _, ok := groups[idx.Name]; !ok {
+			groups[idx.Name] = &idxGroup{
+				name:      idx.Name,
+				nonUnique: idx.NonUnique,
+				idxType:   idx.Type,
+			}
+			order = append(order, idx.Name)
+		}
+		groups[idx.Name].columns = append(groups[idx.Name].columns, idx.Columns)
+	}
+
+	result := &executor.QueryResult{
+		Columns: []string{"Index", "Type", "Unique", "Columns"},
+		IsQuery: true,
+	}
+	for _, name := range order {
+		g := groups[name]
+		unique := "YES"
+		if g.nonUnique {
+			unique = "NO"
+		}
+		result.Rows = append(result.Rows, []any{name, g.idxType, unique, strings.Join(g.columns, ", ")})
+	}
+	_ = m.displayQueryResult(result, nil, output.FormatTable)
+}
+
+// handleListViews lists views, optionally filtered by pattern.
+func (m *Model) handleListViews(pattern string) {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+	db := m.deps.Pool.CurrentDB()
+	views, err := m.deps.Pool.Views(db)
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		return
+	}
+
+	// Filter by pattern if provided
+	if pattern != "" {
+		globPattern := strings.ReplaceAll(pattern, "%", "*")
+		var filtered []string
+		for _, v := range views {
+			matched, _ := filepath.Match(globPattern, v)
+			if matched {
+				filtered = append(filtered, v)
+			}
+		}
+		if len(filtered) == 0 {
+			prefix := strings.TrimRight(pattern, "*%")
+			if prefix != "" {
+				for _, v := range views {
+					if strings.HasPrefix(strings.ToLower(v), strings.ToLower(prefix)) {
+						filtered = append(filtered, v)
+					}
+				}
+			}
+		}
+		views = filtered
+	}
+
+	if len(views) == 0 {
+		if pattern != "" {
+			m.addOutput(fmt.Sprintf("No views found matching %q.", pattern))
+		} else {
+			m.addOutput("No views found.")
+		}
+		return
+	}
+	m.addOutput(fmt.Sprintf("  List of views (%d):", len(views)))
+	for _, v := range views {
+		m.addOutput(fmt.Sprintf("   %s", v))
+	}
+}
+
+// handleSet sets a session variable.
+func (m *Model) handleSet(parts []string) {
+	if len(parts) == 0 {
+		// List all variables
+		if len(m.sessionVars) == 0 {
+			m.addOutput("No session variables set. Use \\set <name> <value> to define one.")
+		} else {
+			m.addOutput("  Session variables:")
+			for k, v := range m.sessionVars {
+				m.addOutput(fmt.Sprintf("   %s = %s", k, v))
+			}
+		}
+		return
+	}
+	if len(parts) == 1 {
+		if val, ok := m.sessionVars[parts[0]]; ok {
+			m.addOutput(fmt.Sprintf("  %s = %s", parts[0], val))
+		} else {
+			m.addOutput(fmt.Sprintf("  Variable %q not set.", parts[0]))
+		}
+		return
+	}
+	if m.sessionVars == nil {
+		m.sessionVars = make(map[string]string)
+	}
+	name := parts[0]
+	value := strings.Join(parts[1:], " ")
+	m.sessionVars[name] = value
+	m.addOutput(fmt.Sprintf("  Set %s = %s", name, value))
+}
+
+// handleGet shows a session variable value.
+func (m *Model) handleGet(parts []string) {
+	if len(parts) == 0 {
+		m.handleSet(nil) // show all
+		return
+	}
+	name := parts[0]
+	if val, ok := m.sessionVars[name]; ok {
+		m.addOutput(val)
+	} else {
+		m.addOutput(fmt.Sprintf("  Variable %q not set.", name))
+	}
+}
+
+// handlePrompt prompts the user for input (stores into a session variable).
+// In TUI mode, this creates a prompt message. The actual input is handled
+// by prompting the user to type a value after the command.
+func (m *Model) handlePrompt(parts []string) {
+	if len(parts) == 0 {
+		m.addOutput("Usage: \\prompt <varname> [prompt_text]")
+		return
+	}
+	varName := parts[0]
+	promptText := "Enter value: "
+	if len(parts) >= 2 {
+		promptText = strings.Join(parts[1:], " ") + ": "
+	}
+	// In TUI, we show the prompt and set a state to capture next input
+	m.addOutput(fmt.Sprintf("%s(Type the value for %s and press Enter)", promptText, varName))
+	// Set pending prompt state
+	if m.sessionVars == nil {
+		m.sessionVars = make(map[string]string)
+	}
+	// Store a special marker so next input is captured
+	m.sessionVars["__prompt_var"] = varName
+}
+
+// handlePset controls output format details.
+func (m *Model) handlePset(parts []string) {
+	if len(parts) == 0 {
+		m.addOutput(fmt.Sprintf("  border: %d", 1))
+		m.addOutput(fmt.Sprintf("  expanded: %s", boolStr(m.autoVerticalOutput)))
+		m.addOutput(fmt.Sprintf("  header: %s", boolStr(m.showHeader)))
+		m.addOutput(fmt.Sprintf("  null: %s", "NULL"))
+		m.addOutput(fmt.Sprintf("  pager: %s", "on"))
+		m.addOutput(fmt.Sprintf("  title: %s", boolStr(m.resultTitle != "")))
+		if m.resultTitle != "" {
+			m.addOutput(fmt.Sprintf("  title_text: %s", m.resultTitle))
+		}
+		return
+	}
+	option := strings.ToLower(parts[0])
+	switch option {
+	case "border":
+		m.addOutput("Border style: 1 (default)")
+	case "expanded", "x":
+		if len(parts) >= 2 {
+			switch strings.ToLower(parts[1]) {
+			case "on", "1", "true", "auto":
+				m.autoVerticalOutput = true
+				m.addOutput("Expanded display is on.")
+			case "off", "0", "false":
+				m.autoVerticalOutput = false
+				m.addOutput("Expanded display is off.")
+			default:
+				m.addOutput("Usage: \\pset expanded [on|off|auto]")
+			}
+		} else {
+			m.autoVerticalOutput = !m.autoVerticalOutput
+			m.addOutput(fmt.Sprintf("Expanded display is %s.", boolStr(m.autoVerticalOutput)))
+		}
+	case "null":
+		if len(parts) >= 2 {
+			m.addOutput(fmt.Sprintf("Null display set to %q.", parts[1]))
+		} else {
+			m.addOutput("Null display: \"NULL\"")
+		}
+	case "pager":
+		m.addOutput("Pager: on (uses terminal scrollback)")
+	case "header":
+		if len(parts) >= 2 {
+			switch strings.ToLower(parts[1]) {
+			case "on", "true", "1":
+				m.showHeader = true
+				m.addOutput("Header display turned on.")
+			case "off", "false", "0":
+				m.showHeader = false
+				m.addOutput("Header display turned off.")
+			default:
+				m.addOutput("Usage: \\pset header on|off")
+			}
+		} else {
+			if m.showHeader {
+				m.addOutput("Header display is on.")
+			} else {
+				m.addOutput("Header display is off.")
+			}
+		}
+	case "title":
+		if len(parts) >= 2 {
+			m.resultTitle = strings.Join(parts[1:], " ")
+			m.addOutput(fmt.Sprintf("Title set to: %s", m.resultTitle))
+		} else if m.resultTitle != "" {
+			m.addOutput(fmt.Sprintf("Title: %s", m.resultTitle))
+		} else {
+			m.addOutput("No title set.")
+		}
+	case "format":
+		if len(parts) >= 2 {
+			f, err := output.ParseFormat(parts[1])
+			if err != nil {
+				m.addOutput(fmt.Sprintf("ERROR: %s", err))
+			} else {
+				m.deps.Formatter.SetFormat(f)
+				m.addOutput(fmt.Sprintf("Output format set to %s", f))
+			}
+		} else {
+			m.addOutput(fmt.Sprintf("Current format: %s", m.deps.Formatter.CurrentFormat()))
+		}
+	default:
+		m.addOutput(fmt.Sprintf("Unknown pset option: %s", option))
+		m.addOutput("Available options: border, expanded, null, pager, title, format")
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// handleG executes the last query (like \g in psql), optionally saving to file.
+func (m *Model) handleG(parts []string) {
+	sql := m.lastQuery
+	if sql == "" {
+		m.addOutput("No previous query to execute. Run a query first.")
+		return
+	}
+	if len(parts) >= 1 {
+		// Execute and save to file
+		filePath := parts[0]
+		if strings.HasPrefix(filePath, "~") {
+			home, err := os.UserHomeDir()
+			if err == nil {
+				filePath = home + filePath[1:]
+			}
+		}
+		m.addOutput(fmt.Sprintf("Executing query and saving to %s ...", filePath))
+		// Execute and export
+		result, err := m.deps.Executor.Execute(context.Background(), sql+";")
+		if err != nil {
+			m.addOutput(fmt.Sprintf("ERROR: %s", err))
+			return
+		}
+		if result.Error != nil {
+			m.addOutput(fmt.Sprintf("ERROR: %s", result.Error))
+			return
+		}
+
+		// Determine export format
+		var format output.ExportFormat
+		if len(parts) >= 2 {
+			f, err := output.ParseExportFormat(parts[1])
+			if err != nil {
+				m.addOutput(fmt.Sprintf("Error: %s", err))
+				return
+			}
+			format = f
+		} else {
+			f, err := output.InferExportFormat(filePath)
+			if err != nil {
+				format = output.ExportCSV // default
+			} else {
+				format = f
+			}
+		}
+
+		rowCount, err := output.ExportResult(result, filePath, format)
+		if err != nil {
+			m.addOutput(fmt.Sprintf("Export failed: %s", err))
+			return
+		}
+		m.addOutput(fmt.Sprintf("Exported %d rows to %s (%s format)", rowCount, filePath, format))
+		return
+	}
+	// Just re-execute the last query
+	m.ed.Clear()
+	m.executeInput(sql, output.FormatTable)
+}
+
+// handleEncoding shows or sets the client character encoding.
+func (m *Model) handleEncoding(parts []string) {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+	if len(parts) == 0 {
+		encoding, err := m.deps.Pool.GetEncoding()
+		if err != nil {
+			m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		} else {
+			m.addOutput(fmt.Sprintf("Client encoding: %s", encoding))
+		}
+		return
+	}
+	encoding := parts[0]
+	if err := m.deps.Pool.SetEncoding(encoding); err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+	} else {
+		m.addOutput(fmt.Sprintf("Client encoding set to %s", encoding))
+	}
+}
+
+// handleShowFunction shows a function definition.
+func (m *Model) handleShowFunction(functionName string) {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+	db := m.deps.Pool.CurrentDB()
+	def, err := m.deps.Pool.ShowFunction(db, functionName)
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		return
+	}
+	// Highlight the function definition (preserve DB formatting, don't reformat)
+	if m.deps.Highlighter != nil {
+		m.addOutput(m.deps.Highlighter.Highlight(def))
+	} else {
+		m.addOutput(def)
+	}
+}
+
+// handlePrivileges shows table privileges.
+func (m *Model) handlePrivileges(tableName string) {
+	if m.deps.Pool == nil {
+		m.addOutput("No connection available.")
+		return
+	}
+	db := m.deps.Pool.CurrentDB()
+	privileges, err := m.deps.Pool.TablePrivileges(db, tableName)
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: %s", err))
+		return
+	}
+	if len(privileges) == 0 {
+		m.addOutput(fmt.Sprintf("No privileges found for table %q (or insufficient permissions).", tableName))
+		return
+	}
+	m.addOutput(fmt.Sprintf("  Privileges for %s:", tableName))
+	for _, p := range privileges {
+		m.addOutput(fmt.Sprintf("   %s", p))
+	}
+}
+
+// handleExplainCmd executes an EXPLAIN query.
+func (m Model) handleExplainCmd(parts []string) (tea.Model, tea.Cmd) {
+	if len(parts) == 0 {
+		m.addOutput("Usage: \\explain [analyze] <sql>")
+		m.addOutput("  Runs EXPLAIN on the given SQL statement.")
+		m.addOutput("  Add 'analyze' to actually execute the query and show timing.")
+		return m, nil
+	}
+
+	analyze := false
+	sqlStart := 0
+	if strings.EqualFold(parts[0], "analyze") && len(parts) >= 2 {
+		analyze = true
+		sqlStart = 1
+	}
+
+	sql := strings.Join(parts[sqlStart:], " ")
+	if sql == "" {
+		m.addOutput("Usage: \\explain [analyze] <sql>")
+		return m, nil
+	}
+
+	explainSQL := "EXPLAIN"
+	if analyze {
+		explainSQL += " ANALYZE"
+	}
+	explainSQL += " " + sql
+
+	m.ed.Clear()
+	return m.executeInput(explainSQL+";", output.FormatTable)
+}
+
 // formatStatus returns a human-readable connection status string.
 func (m Model) formatStatus() string {
 	var sb strings.Builder
@@ -2459,6 +3227,18 @@ func (m Model) formatStatus() string {
 	sb.WriteString(fmt.Sprintf("\nOutput format: %s\n", m.deps.Formatter.CurrentFormat()))
 	if m.safeUpdates {
 		sb.WriteString("Safe updates: ON\n")
+	}
+	if m.resultTitle != "" {
+		sb.WriteString(fmt.Sprintf("Title: %s\n", m.resultTitle))
+	}
+	if m.verboseMode {
+		sb.WriteString("Verbose: ON\n")
+	}
+	if !m.showWarnings {
+		sb.WriteString("Warnings: OFF\n")
+	}
+	if len(m.sessionVars) > 0 {
+		sb.WriteString(fmt.Sprintf("Session vars: %d\n", len(m.sessionVars)))
 	}
 	if m.deps.Executor != nil {
 		if threshold := m.deps.Executor.SlowThreshold(); threshold > 0 {
@@ -2497,12 +3277,11 @@ func (m *Model) handleDesc(parts []string) {
 			m.addOutput(fmt.Sprintf("ERROR: %s", err))
 			return
 		}
-		// Format and highlight the CREATE TABLE statement
-		formatted := highlight.FormatSQL(createSQL)
+		// Highlight the CREATE TABLE statement (preserve DB formatting, don't reformat)
 		if m.deps.Highlighter != nil {
-			m.addOutput(m.deps.Highlighter.Highlight(formatted))
+			m.addOutput(m.deps.Highlighter.Highlight(createSQL))
 		} else {
-			m.addOutput(formatted)
+			m.addOutput(createSQL)
 		}
 
 	case "indexes", "index", "keys":
@@ -2815,41 +3594,70 @@ func helpText() string {
 	return `mysh - MySQL CLI with syntax highlighting and auto-completion
 
 Backslash commands:
-  \help, \h, \?    Show this help message
-  \quit, \q         Exit mysh
-  \clear, \c        Clear screen output
-  \status, \s       Show connection status
-  \use <db>         Switch to database <db>
-  \refresh, \r      Refresh metadata cache
-  \format [type]    Set/show output format (table|vertical|json|markdown|sql)
-  \history [pat]    Search/show command history
-  \connect <dsn>    Connect to a database (user@host:port/db or just db)
-  \reconnect        Reconnect to the current server
-  \rollback         Rollback current transaction
-  \desc <t> [mode]  Describe table (columns|full|indexes|create)
-  \source <file>    Execute SQL from file
-  \edit, \e         Open editor ($EDITOR or vi) to edit/execute SQL
-  \pipe, \| <cmd>   Pipe last query result to a system command
-  \copy <what>      Copy to clipboard (result|query|sql)
-  \timing           Toggle query execution time display
-  \safe-updates [on|off]  Toggle safe-updates mode (block UPDATE/DELETE without WHERE/LIMIT)
-  \slow [seconds]   Set/show slow query warning threshold (0 = disabled)
-  \mouse            Toggle mouse mode (scroll wheel vs text selection)
-  \export <f> [fmt] Export last result to file (csv/json/markdown)
-  \watch [sec] [SQL] Watch query at intervals (default 5s, Ctrl+C stop)
   \alias [name sql] Show/set command aliases
-  \unalias <name>   Remove temp alias
-  \session          List saved sessions
-  \session <name>   Switch to saved session
-  \session save <n> Save current connection as session
-  \session del <n>  Delete a saved session
+  \cd [dir]         Change/show working directory (for \source, \sys)
+  \clear, \c        Clear screen output
+  \connect <dsn>    Connect to a database (user@host:port/db or just db)
+  \conninfo         Show detailed connection info
+  \copy <what>      Copy to clipboard (result|query|sql)
+  \desc <t> [mode]  Describe table (no arg = list tables; columns|full|indexes|create)
+  \di [table], \indexes  List indexes (optional table filter)
+  \dn, \schemas      List schemas (MySQL: databases, PostgreSQL: schemas)
+  \dt [pattern], \tables  List tables (optional pattern: user* or user%)
+  \du, \users        List database users
+  \dv [pattern], \views   List views (optional pattern)
+  \echo <text>      Echo text to output
+  \edit, \e         Open editor ($EDITOR or vi) to edit/execute SQL
+  \encoding [name]  Show/set client character encoding
+  \explain [analyze] <sql>  Run EXPLAIN on SQL (add analyze to execute)
+  \export <f> [fmt] Export last result to file (csv/json/markdown)
   \fav, \favorites   List favorite queries
   \fav <name>        Execute a saved favorite
   \fav + <n> [desc]  Save last query as favorite
   \fav - <name>      Delete a favorite
   \fav show <name>   Show favorite SQL
-  \cd [dir]         Change/show working directory (for \source, \sys)
+  \format [type]    Set/show output format (table|vertical|json|markdown|sql)
+  \g [file]         Execute last query, optionally save to file
+  \get <name>       Show session variable value
+  \gx               Execute last query with vertical output
+  \help, \h, \?    Show this help message
+  \history [pat]    Search/show command history
+  \l, \list, \databases  List all databases
+  \mouse            Toggle mouse mode (scroll wheel vs text selection)
+  \pipe, \| <cmd>   Pipe last query result to a system command
+  \privileges <t>   Show table privileges
+  \prompt <var> [text]  Prompt for input (stores into variable)
+  \pset [opt [val]] Control output details:
+                       expanded [on|off|auto]  Toggle vertical output
+                       format [table|vertical|json|markdown]  Set output format
+                       header [on|off]         Show/hide column names
+                       null [string]           Set NULL display string
+                       pager                   Show pager status
+                       title [text|off]        Set/clear result title
+  \quit, \q         Exit mysh (also: quit, exit)
+  \reconnect        Reconnect to the current server
+  \refresh, \r      Refresh metadata cache
+  \rollback         Rollback current transaction
+  \safe-updates [on|off]  Toggle safe-updates mode (block UPDATE/DELETE without WHERE/LIMIT)
+  \session          List saved sessions
+  \session <name>   Switch to saved session
+  \session save <n> Save current connection as session
+  \session del <n>  Delete a saved session
+  \sf <func>        Show function definition
+  \set [name value] Show/set session variables
+  \slow [seconds]   Set/show slow query warning threshold (0 = disabled)
+  \source <file>    Execute SQL from file
+  \status, \s       Show connection status
   \sys, \! <cmd>    Execute a system command
+  \T [title|off]    Set/clear result title (shown in markdown output)
+  \timing           Toggle query execution time display
+  \unalias <name>   Remove temp alias
+  \unset <name>     Remove session variable
+  \use <db>         Switch to database <db>
+  \verbose          Toggle verbose mode (show full error details)
+  \warn [on|off]    Toggle warning display
+  \watch [sec] [SQL] Watch query at intervals (default 5s, Ctrl+C stop)
+  \x, \expanded     Toggle expanded (vertical) output mode
 
 Format suffixes (append to SQL):
   \G                Display result in vertical format
@@ -2868,4 +3676,9 @@ Keyboard shortcuts:
   Alt+B/F           Move word backward/forward
   Enter             Execute SQL (ends with ;) or start multi-line
 `
+}
+
+// SetShowHeader controls whether column headers are displayed in results.
+func (m *Model) SetShowHeader(show bool) {
+	m.showHeader = show
 }

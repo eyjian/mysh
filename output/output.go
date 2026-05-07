@@ -58,6 +58,7 @@ type Formatter struct {
 	writer     io.Writer
 	showTiming bool // whether to include execution time in output
 	maxWidth   int  // max terminal width for column truncation (0 = unlimited)
+	showHeader bool // whether to show column header row
 }
 
 // NewFormatter creates a new Formatter with the given format and writer.
@@ -65,8 +66,9 @@ func NewFormatter(format Format, writer io.Writer) *Formatter {
 	return &Formatter{
 		format:     format,
 		writer:     writer,
-		showTiming: true, // default: show timing
-		maxWidth:   0,    // unlimited by default
+		showTiming: true,  // default: show timing
+		maxWidth:   0,     // unlimited by default
+		showHeader: true,  // default: show header
 	}
 }
 
@@ -79,6 +81,16 @@ func (f *Formatter) SetMaxWidth(w int) {
 // MaxWidth returns the current max width setting.
 func (f *Formatter) MaxWidth() int {
 	return f.maxWidth
+}
+
+// SetShowHeader controls whether the column header row is displayed.
+func (f *Formatter) SetShowHeader(show bool) {
+	f.showHeader = show
+}
+
+// ShowHeader returns whether the column header row is displayed.
+func (f *Formatter) ShowHeader() bool {
+	return f.showHeader
 }
 
 // SetFormat changes the output format.
@@ -193,21 +205,23 @@ func (f *Formatter) writeTable(result *executor.QueryResult) error {
 	separator := buildSeparator(widths)
 
 	// Print header
-	fmt.Fprintln(f.writer, separator)
-	var header strings.Builder
-	header.WriteString("|")
-	for i, col := range result.Columns {
-		header.WriteString(" ")
-		w := widths[i]
-		if utf8.RuneCountInString(col) > w {
-			header.WriteString(truncateRunes(col, w))
-		} else {
-			header.WriteString(padRight(col, w))
+	if f.showHeader {
+		fmt.Fprintln(f.writer, separator)
+		var header strings.Builder
+		header.WriteString("|")
+		for i, col := range result.Columns {
+			header.WriteString(" ")
+			w := widths[i]
+			if utf8.RuneCountInString(col) > w {
+				header.WriteString(truncateRunes(col, w))
+			} else {
+				header.WriteString(padRight(col, w))
+			}
+			header.WriteString(" |")
 		}
-		header.WriteString(" |")
+		fmt.Fprintln(f.writer, header.String())
+		fmt.Fprintln(f.writer, separator)
 	}
-	fmt.Fprintln(f.writer, header.String())
-	fmt.Fprintln(f.writer, separator)
 
 	// Print rows (using styled values)
 	for _, row := range styledRows {

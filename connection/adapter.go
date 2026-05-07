@@ -12,7 +12,7 @@ type DBAdapter interface {
 	DriverName() string
 
 	// DSN builds the data-source-name string from a connection config.
-	DSN(host string, port int, user, password, database, charset string) string
+	DSN(host string, port int, user, password, database, charset, sslMode string) string
 
 	// DefaultPort returns the default TCP port for this database type.
 	DefaultPort() int
@@ -52,6 +52,30 @@ type DBAdapter interface {
 
 	// IsConnectionError checks if an error is a connection-level error.
 	IsConnectionError(err error) bool
+
+	// Schemas returns a list of schemas (MySQL: databases, PostgreSQL: schemas).
+	Schemas(db *sql.DB) ([]string, error)
+
+	// Users returns a list of database users.
+	Users(db *sql.DB) ([]string, error)
+
+	// Views returns a list of views in the given database/schema.
+	Views(db *sql.DB, database string) ([]string, error)
+
+	// ShowFunction returns the definition of a function.
+	ShowFunction(db *sql.DB, database, function string) (string, error)
+
+	// TablePrivileges returns privilege information for a table.
+	TablePrivileges(db *sql.DB, database, table string) ([]string, error)
+
+	// ListIndexes returns index information for a table (or all tables if table is empty).
+	ListIndexes(db *sql.DB, database, table string) ([]TableIndexInfo, error)
+
+	// SetEncoding sets the client character encoding.
+	SetEncoding(db *sql.DB, encoding string) error
+
+	// GetEncoding returns the current client character encoding.
+	GetEncoding(db *sql.DB) (string, error)
 }
 
 // NewAdapter creates the appropriate DBAdapter based on the driver name.

@@ -14,7 +14,7 @@ func (mysqlAdapter) DriverName() string { return "mysql" }
 
 func (mysqlAdapter) DefaultPort() int { return 3306 }
 
-func (mysqlAdapter) DSN(host string, port int, user, password, database, charset string) string {
+func (mysqlAdapter) DSN(host string, port int, user, password, database, charset, sslMode string) string {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", user, password, host, port, database)
 	if charset != "" {
 		dsn += "?charset=" + charset
@@ -292,4 +292,226 @@ func (mysqlAdapter) IsConnectionError(err error) bool {
 		strings.Contains(msg, "connect: connection refused") ||
 		strings.Contains(msg, "i/o timeout") ||
 		strings.Contains(msg, "driver: bad conn")
+}
+
+func (mysqlAdapter) Schemas(db *sql.DB) ([]string, error) {
+	// In MySQL, schemas are databases
+	return mysqlAdapter{}.Databases(db)
+}
+
+func (mysqlAdapter) Users(db *sql.DB) ([]string, error) {
+	rows, err := db.Query("SELECT User FROM mysql.user ORDER BY User")
+	if err != nil {
+		// May lack permission; try alternative
+		rows, err = db.Query("SELECT CURRENT_USER()")
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var user string
+		if rows.Next() {
+			if err := rows.Scan(&user); err != nil {
+				return nil, err
+			}
+		}
+		return []string{user}, rows.Err()
+	}
+	defer rows.Close()
+
+	var users []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		users = append(users, name)
+	}
+	return users, rows.Err()
+}
+
+func (mysqlAdapter) Views(db *sql.DB, database string) ([]string, error) {
+	query := "SHOW FULL TABLES WHERE Table_type = 'VIEW'"
+	if database != "" {
+		query = fmt.Sprintf("SHOW FULL TABLES FROM `%s` WHERE Table_type = 'VIEW'", database)
+	}
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var views []string
+	for rows.Next() {
+		var name, typ string
+		if err := rows.Scan(&name, &typ); err != nil {
+			return nil, err
+		}
+		views = append(views, name)
+	}
+	return views, rows.Err()
+}
+
+func (mysqlAdapter) ShowFunction(db *sql.DB, database, function string) (string, error) {
+	query := fmt.Sprintf("SHOW CREATE FUNCTION `%s`", function)
+	if database != "" {
+		query = fmt.Sprintf("SHOW CREATE FUNCTION `%s`.`%s`", database, function)
+	}
+	rows, err := db.Query(query)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		cols, _ := rows.Columns()
+		values := make([]sql.NullString, len(cols))
+		scanArgs := make([]interface{}, len(cols))
+		for i := range values {
+			scanArgs[i] = &values[i]
+		}
+		if err := rows.Scan(scanArgs...); err != nil {
+			return "", err
+		}
+		// The function body is typically in the 2nd or 3rd column
+		for i := len(values) - 1; i >= 0; i-- {
+			if values[i].Valid && len(values[i].String) > 20 {
+				return values[i].String, nil
+			}
+		}
+		// Fallback: return whatever we have
+		for _, v := range values {
+			if v.Valid {
+				return v.String, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("function %s not found", function)
+}
+
+func (mysqlAdapter) TablePrivileges(db *sql.DB, database, table string) ([]string, error) {
+	query := fmt.Sprintf("SHOW GRANTS")
+	if database != "" && table != "" {
+		// MySQL doesn't have SHOW GRANTS for specific table, query information_schema
+		query = fmt.Sprintf(
+			"SELECT GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.TABLE_PRIVILEGES WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s' ORDER BY GRANTEE, PRIVILEGE_TYPE",
+			database, table)
+	}
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var privileges []string
+	for rows.Next() {
+		cols, _ := rows.Columns()
+		if len(cols) == 1 {
+			var grant string
+			if err := rows.Scan(&grant); err != nil {
+				return nil, err
+			}
+			privileges = append(privileges, grant)
+		} else {
+			// information_schema format
+			var grantee, priv, grantable string
+			if err := rows.Scan(&grantee, &priv, &grantable); err != nil {
+				return nil, err
+			}
+			g := "N"
+			if grantable == "YES" {
+				g = "Y"
+			}
+			privileges = append(privileges, fmt.Sprintf("%s: %s (grantable: %s)", grantee, priv, g))
+		}
+	}
+	return privileges, rows.Err()
+}
+
+func (mysqlAdapter) ListIndexes(db *sql.DB, database, table string) ([]TableIndexInfo, error) {
+	if table != "" {
+		return showIndexesForTable(db, database, table)
+	}
+	// No table specified: list indexes for all tables
+	tables, err := mysqlAdapter{}.Tables(db, database)
+	if err != nil {
+		return nil, err
+	}
+	var allIndexes []TableIndexInfo
+	for _, t := range tables {
+		idxs, err := showIndexesForTable(db, database, t)
+		if err != nil {
+			continue
+		}
+		allIndexes = append(allIndexes, idxs...)
+	}
+	return allIndexes, nil
+}
+
+// showIndexesForTable returns index info for a single table.
+func showIndexesForTable(db *sql.DB, database, table string) ([]TableIndexInfo, error) {
+	query := fmt.Sprintf("SHOW INDEX FROM `%s`", table)
+	if database != "" {
+		query = fmt.Sprintf("SHOW INDEX FROM `%s`.`%s`", database, table)
+	}
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Use dynamic column scanning
+	cols, _ := rows.Columns()
+	values := make([]interface{}, len(cols))
+	for i := range values {
+		values[i] = new(sql.NullString)
+	}
+
+	var indexes []TableIndexInfo
+	for rows.Next() {
+		if err := rows.Scan(values...); err != nil {
+			return nil, err
+		}
+		nonUnique := "0"
+		keyName := ""
+		colName := ""
+		idxType := ""
+		if len(cols) > 1 {
+			if v, ok := values[1].(*sql.NullString); ok && v.Valid {
+				nonUnique = v.String
+			}
+		}
+		if len(cols) > 2 {
+			if v, ok := values[2].(*sql.NullString); ok && v.Valid {
+				keyName = v.String
+			}
+		}
+		if len(cols) > 4 {
+			if v, ok := values[4].(*sql.NullString); ok && v.Valid {
+				colName = v.String
+			}
+		}
+		if len(cols) > 10 {
+			if v, ok := values[10].(*sql.NullString); ok && v.Valid {
+				idxType = v.String
+			}
+		}
+		indexes = append(indexes, TableIndexInfo{
+			Name:      keyName,
+			Columns:   colName,
+			NonUnique: nonUnique == "1",
+			Type:      idxType,
+		})
+	}
+	return indexes, rows.Err()
+}
+
+func (mysqlAdapter) SetEncoding(db *sql.DB, encoding string) error {
+	_, err := db.Exec(fmt.Sprintf("SET NAMES '%s'", encoding))
+	return err
+}
+
+func (mysqlAdapter) GetEncoding(db *sql.DB) (string, error) {
+	var value string
+	err := db.QueryRow("SELECT @@character_set_client").Scan(&value)
+	return value, err
 }

@@ -373,7 +373,7 @@ func TestBackslashCommand_HistoryEmpty(t *testing.T) {
 	updated := model.(Model)
 	found := false
 	for _, line := range updated.output {
-		if strings.Contains(line, "No history entries") {
+		if strings.Contains(line, "No history entries.") {
 			found = true
 			break
 		}
@@ -418,6 +418,296 @@ func TestBackslashCommand_HistorySearch(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected INSERT in history search results")
+	}
+}
+
+// --- \l, \list, \databases tests ---
+
+func TestBackslashCommand_ListDatabases_NilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\l")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\l with nil pool")
+	}
+}
+
+func TestBackslashCommand_ListDatabases_Aliases(t *testing.T) {
+	for _, cmd := range []string{"\\list", "\\databases"} {
+		m := newTestModel()
+		m.deps.Pool = nil
+		m.ed.Insert(cmd)
+		model, _ := m.handleEnter()
+		updated := model.(Model)
+		found := false
+		for _, line := range updated.output {
+			if strings.Contains(line, "No connection") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected 'No connection' output after %s with nil pool", cmd)
+		}
+	}
+}
+
+// --- \dt, \tables tests ---
+
+func TestBackslashCommand_ListTables_NilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\dt")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\dt with nil pool")
+	}
+}
+
+func TestBackslashCommand_ListTables_Alias(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\tables")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\tables with nil pool")
+	}
+}
+
+// --- \echo tests ---
+
+func TestBackslashCommand_Echo_Text(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\echo hello world")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "hello world") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'hello world' in output after \\echo hello world")
+	}
+}
+
+func TestBackslashCommand_Echo_Empty(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\echo")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	// Should produce output without panicking
+	_ = updated
+}
+
+// --- \conninfo tests ---
+
+func TestBackslashCommand_ConnInfo_NilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\conninfo")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\conninfo with nil pool")
+	}
+}
+
+// --- \x, \expanded tests ---
+
+func TestBackslashCommand_ToggleExpanded(t *testing.T) {
+	m := newTestModel()
+	initial := m.autoVerticalOutput
+	m.ed.Insert("\\x")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.autoVerticalOutput == initial {
+		t.Error("expected autoVerticalOutput to toggle after \\x")
+	}
+	// Should show "on" or "off" in output
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "Expanded display is") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Expanded display is' in output after \\x")
+	}
+}
+
+func TestBackslashCommand_ToggleExpandedTwice(t *testing.T) {
+	m := newTestModel()
+	initial := m.autoVerticalOutput
+	// Toggle twice should return to original state
+	m.ed.Insert("\\x")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	updated.ed.Insert("\\x")
+	model2, _ := updated.handleEnter()
+	updated2 := model2.(Model)
+	if updated2.autoVerticalOutput != initial {
+		t.Error("expected autoVerticalOutput to return to initial state after two \\x")
+	}
+}
+
+func TestBackslashCommand_ExpandedAlias(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\expanded")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "Expanded display is") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Expanded display is' in output after \\expanded")
+	}
+}
+
+// --- \dn, \schemas tests ---
+
+func TestBackslashCommand_ListSchemas_NilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\dn")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\dn with nil pool")
+	}
+}
+
+func TestBackslashCommand_ListSchemas_Alias(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\schemas")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\schemas with nil pool")
+	}
+}
+
+// --- \du, \users tests ---
+
+func TestBackslashCommand_ListUsers_NilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\du")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\du with nil pool")
+	}
+}
+
+func TestBackslashCommand_ListUsers_Alias(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\users")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\users with nil pool")
+	}
+}
+
+// --- \d without args lists tables (psql behavior) ---
+
+func TestBackslashCommand_DescNoArgs_ListsTables(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\d")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected \\d without args to list tables (falls through to \\dt behavior)")
+	}
+}
+
+// --- helpText contains new commands ---
+
+func TestHelpText_ContainsNewCommands(t *testing.T) {
+	help := helpText()
+	newCommands := []string{`\l`, `\dt`, `\echo`, `\conninfo`, `\x`, `\dn`, `\du`, `\di`, `\dv`, `\set`, `\get`, `\encoding`, `\verbose`, `\warn`, `\explain`, `\sf`, `\privileges`, `\pset`, `\gx`}
+	for _, cmd := range newCommands {
+		if !strings.Contains(help, cmd) {
+			t.Errorf("helpText should contain %q", cmd)
+		}
 	}
 }
 
@@ -689,5 +979,448 @@ func TestNewModel(t *testing.T) {
 	}
 	if m.mlPrompt != "  -> " {
 		t.Errorf("expected mlPrompt '  -> ', got %q", m.mlPrompt)
+	}
+}
+
+// --- \di, \indexes tests ---
+
+func TestBackslashCommand_ListIndexes_NilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\di")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\di with nil pool")
+	}
+}
+
+func TestBackslashCommand_ListIndexes_Alias(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\indexes")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\indexes with nil pool")
+	}
+}
+
+// --- \dv, \views tests ---
+
+func TestBackslashCommand_ListViews_NilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\dv")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\dv with nil pool")
+	}
+}
+
+func TestBackslashCommand_ListViews_Alias(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\views")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\views with nil pool")
+	}
+}
+
+// --- \set, \get, \unset tests ---
+
+func TestBackslashCommand_SetList(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\set")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No session variables") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No session variables' output after \\set without args")
+	}
+}
+
+func TestBackslashCommand_SetAndGet(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\set myvar hello")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	updated.ed.Insert("\\get myvar")
+	model2, _ := updated.handleEnter()
+	updated2 := model2.(Model)
+	found := false
+	for _, line := range updated2.output {
+		if strings.Contains(line, "hello") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'hello' in output after \\get myvar")
+	}
+}
+
+func TestBackslashCommand_Unset(t *testing.T) {
+	m := newTestModel()
+	m.sessionVars = map[string]string{"x": "val"}
+	m.ed.Insert("\\unset x")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if _, ok := updated.sessionVars["x"]; ok {
+		t.Error("expected variable 'x' to be unset")
+	}
+}
+
+// --- \pset tests ---
+
+func TestBackslashCommand_PsetNoArgs(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\pset")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "border") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'border' in output after \\pset without args")
+	}
+}
+
+func TestBackslashCommand_PsetExpanded(t *testing.T) {
+	m := newTestModel()
+	m.autoVerticalOutput = false
+	m.ed.Insert("\\pset expanded on")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if !updated.autoVerticalOutput {
+		t.Error("expected autoVerticalOutput=true after \\pset expanded on")
+	}
+}
+
+func TestBackslashCommand_PsetUnknown(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\pset unknown_option")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "Unknown pset option") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Unknown pset option' output")
+	}
+}
+
+// --- \T (title) tests ---
+
+func TestBackslashCommand_TitleSet(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\T My Report")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.resultTitle != "My Report" {
+		t.Errorf("expected resultTitle='My Report', got %q", updated.resultTitle)
+	}
+}
+
+func TestBackslashCommand_TitleClear(t *testing.T) {
+	m := newTestModel()
+	m.resultTitle = "Old Title"
+	m.ed.Insert("\\T off")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.resultTitle != "" {
+		t.Errorf("expected resultTitle cleared, got %q", updated.resultTitle)
+	}
+}
+
+func TestBackslashCommand_TitleShow(t *testing.T) {
+	m := newTestModel()
+	m.resultTitle = "My Title"
+	m.ed.Insert("\\T")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "My Title") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'My Title' in output after \\T")
+	}
+}
+
+// --- \verbose tests ---
+
+func TestBackslashCommand_Verbose(t *testing.T) {
+	m := newTestModel()
+	initial := m.verboseMode
+	m.ed.Insert("\\verbose")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.verboseMode == initial {
+		t.Error("expected verboseMode to toggle after \\verbose")
+	}
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "Verbose mode is") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Verbose mode is' in output")
+	}
+}
+
+// --- \warn tests ---
+
+func TestBackslashCommand_Warn(t *testing.T) {
+	m := newTestModel()
+	m.showWarnings = false
+	m.ed.Insert("\\warn on")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if !updated.showWarnings {
+		t.Error("expected showWarnings=true after \\warn on")
+	}
+}
+
+func TestBackslashCommand_WarnToggle(t *testing.T) {
+	m := newTestModel()
+	m.showWarnings = false
+	m.ed.Insert("\\warn")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if !updated.showWarnings {
+		t.Error("expected showWarnings to toggle on after \\warn")
+	}
+}
+
+// --- \encoding tests ---
+
+func TestBackslashCommand_EncodingNilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\encoding")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\encoding with nil pool")
+	}
+}
+
+// --- \sf tests ---
+
+func TestBackslashCommand_ShowFunctionNilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\sf myfunc")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\sf with nil pool")
+	}
+}
+
+func TestBackslashCommand_ShowFunctionNoArg(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\sf")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "Usage:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Usage' output after \\sf without arg")
+	}
+}
+
+// --- \privileges tests ---
+
+func TestBackslashCommand_PrivilegesNilPool(t *testing.T) {
+	m := newTestModel()
+	m.deps.Pool = nil
+	m.ed.Insert("\\privileges mytable")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No connection") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No connection' output after \\privileges with nil pool")
+	}
+}
+
+func TestBackslashCommand_PrivilegesNoArg(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\privileges")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "Usage:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Usage' output after \\privileges without arg")
+	}
+}
+
+// --- \explain tests ---
+
+func TestBackslashCommand_ExplainNoArg(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\explain")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "Usage:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Usage' output after \\explain without arg")
+	}
+}
+
+// --- \gx tests ---
+
+func TestBackslashCommand_GxNoQuery(t *testing.T) {
+	m := newTestModel()
+	m.lastQuery = ""
+	m.ed.Insert("\\gx")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No query") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No query' output after \\gx with no previous query")
+	}
+}
+
+// --- \prompt tests ---
+
+func TestBackslashCommand_PromptNoArg(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\prompt")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "Usage:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Usage' output after \\prompt without arg")
+	}
+}
+
+func TestBackslashCommand_PromptSetsVar(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("\\prompt myvar Enter name")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.sessionVars["__prompt_var"] != "myvar" {
+		t.Error("expected __prompt_var to be set to 'myvar'")
+	}
+}
+
+// --- \g tests ---
+
+func TestBackslashCommand_GNoQuery(t *testing.T) {
+	m := newTestModel()
+	m.lastQuery = ""
+	m.ed.Insert("\\g")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	found := false
+	for _, line := range updated.output {
+		if strings.Contains(line, "No previous query") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'No previous query' output after \\g with no last query")
 	}
 }

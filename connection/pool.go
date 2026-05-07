@@ -32,10 +32,14 @@ func New(cfg *config.ConnectionConfig) (*Pool, error) {
 
 	adapter := NewAdapter(cfg.Driver)
 
-	db, err := sql.Open(adapter.DriverName(), adapter.DSN(
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.Charset))
+	dsn := adapter.DSN(
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.Charset, cfg.SSLMode)
+	// Password-free DSN for error messages / logs
+	safeDSN := adapter.DSN(
+		cfg.Host, cfg.Port, cfg.User, "", cfg.Database, cfg.Charset, cfg.SSLMode)
+	db, err := sql.Open(adapter.DriverName(), dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to open database: %w (dsn: %s)", err, safeDSN)
 	}
 
 	// Configure connection pool
@@ -67,7 +71,7 @@ func New(cfg *config.ConnectionConfig) (*Pool, error) {
 	}
 
 	db.Close()
-	return nil, fmt.Errorf("failed to connect after %d retries: %w", maxRetries, lastErr)
+	return nil, fmt.Errorf("failed to connect after %d retries: %w (dsn: %s)", maxRetries, lastErr, safeDSN)
 }
 
 // NewWithDB creates a Pool from an existing *sql.DB (for testing).
@@ -245,7 +249,7 @@ func (p *Pool) Reset(cfg *config.ConnectionConfig) error {
 	p.adapter = NewAdapter(cfg.Driver)
 
 	db, err := sql.Open(p.adapter.DriverName(), p.adapter.DSN(
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.Charset))
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.Charset, cfg.SSLMode))
 	if err != nil {
 		return fmt.Errorf("failed to reset connection: %w", err)
 	}
@@ -327,4 +331,44 @@ func (p *Pool) DescribeTableSQL(database, table string) string {
 // DescribeFullSQL returns the SQL for full column info.
 func (p *Pool) DescribeFullSQL(database, table string) string {
 	return p.adapter.DescribeFullSQL(database, table)
+}
+
+// Schemas returns a list of schemas (MySQL: databases, PostgreSQL: schemas).
+func (p *Pool) Schemas() ([]string, error) {
+	return p.adapter.Schemas(p.db)
+}
+
+// Users returns a list of database users.
+func (p *Pool) Users() ([]string, error) {
+	return p.adapter.Users(p.db)
+}
+
+// Views returns a list of views in the given database/schema.
+func (p *Pool) Views(database string) ([]string, error) {
+	return p.adapter.Views(p.db, database)
+}
+
+// ShowFunction returns the definition of a function.
+func (p *Pool) ShowFunction(database, function string) (string, error) {
+	return p.adapter.ShowFunction(p.db, database, function)
+}
+
+// TablePrivileges returns privilege information for a table.
+func (p *Pool) TablePrivileges(database, table string) ([]string, error) {
+	return p.adapter.TablePrivileges(p.db, database, table)
+}
+
+// ListIndexes returns index information for a table (or all tables if table is empty).
+func (p *Pool) ListIndexes(database, table string) ([]TableIndexInfo, error) {
+	return p.adapter.ListIndexes(p.db, database, table)
+}
+
+// SetEncoding sets the client character encoding.
+func (p *Pool) SetEncoding(encoding string) error {
+	return p.adapter.SetEncoding(p.db, encoding)
+}
+
+// GetEncoding returns the current client character encoding.
+func (p *Pool) GetEncoding() (string, error) {
+	return p.adapter.GetEncoding(p.db)
 }
