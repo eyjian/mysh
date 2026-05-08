@@ -129,6 +129,11 @@ type Model struct {
 	// Session variables (for \set / \get)
 	sessionVars map[string]string
 
+	// Special session variables (controlled via \set)
+	autoCommit   bool       // AUTOCOMMIT: auto-commit each statement (default: on)
+	onErrorStop  bool       // ON_ERROR_STOP: stop script on error (default: off)
+	echoMode     echoModeT  // ECHO: echo SQL before execution
+
 	// Result title (for \T)
 	resultTitle string
 
@@ -169,6 +174,9 @@ func NewModel(deps Dependencies) Model {
 		showTiming:          true,
 		showHeader:          true,
 		sessionVars:         make(map[string]string),
+		autoCommit:          true,
+		onErrorStop:         false,
+		echoMode:            echoOff,
 		verboseMode:        false,
 		showWarnings:       true,
 		workDir:             "", // will be set on first prompt
@@ -229,6 +237,7 @@ type execMultiResultMsg struct {
 	stmts   []string // original SQL text of each statement
 	// perFormat[i] is the format override for stmts[i] (nil means use global format)
 	perFormat []output.Format
+	stopped   bool // true if execution was stopped by ON_ERROR_STOP
 }
 
 // execTickMsg is sent periodically during query execution to update the timer/spinner.
@@ -291,6 +300,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerFrame = 0
 		if msg.err != nil {
 			m.addOutput(fmt.Sprintf("%s", msg.err))
+			if msg.stopped {
+				m.addOutput("Execution stopped (ON_ERROR_STOP is on).")
+			}
 		} else {
 			for i, result := range msg.results {
 				if i > 0 {
@@ -1348,6 +1360,8 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 
 	case "\\echo":
 		text := strings.TrimSpace(strings.TrimPrefix(cmd, command))
+		// Support :varname substitution in \echo (psql-compatible)
+		text = m.substituteVarsInText(text)
 		m.addOutput(text)
 
 	case "\\conninfo":
@@ -1600,8 +1614,32 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 	displayEntry := strings.TrimSpace(originalInput)
 	m.addOutput(m.prompt + m.highlightDisplayEntry(displayEntry))
 
+	// Substitute session variables in SQL (:varname, :'varname', :"varname")
+	substituted := m.substituteVars(input)
+
+	// ECHO queries/all: show the SQL after variable substitution
+	if m.echoMode == echoQueries || m.echoMode == echoAll {
+		if substituted != input {
+			m.addOutput(fmt.Sprintf("  Substituted: %s", substituted))
+		}
+	}
+
 	// Normalize table name casing in SQL before execution
-	execSQL := m.normalizeTableNames(input + ";")
+	execSQL := m.normalizeTableNames(substituted + ";")
+
+	// AUTOCOMMIT off: automatically begin a transaction before each statement
+	// (unless already in a transaction or the statement itself is BEGIN/COMMIT/ROLLBACK)
+	if !m.autoCommit && m.deps.Executor != nil && !m.deps.Executor.InTransaction() {
+		upper := strings.ToUpper(strings.TrimSpace(input))
+		upper = strings.TrimSuffix(upper, ";")
+		if !m.isTransactionControl(upper) {
+			if _, err := m.deps.Executor.Execute(context.Background(), "BEGIN"); err != nil {
+				m.addOutput(fmt.Sprintf("ERROR: %s", err))
+				m.ed.Clear()
+				return m, nil
+			}
+		}
+	}
 
 	m.executing = true
 	m.execStart = time.Now()
@@ -1620,17 +1658,21 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 			perFmt[len(perFmt)-1] = formatOverride
 		}
 		// Multi-statement execution
+		onErrorStop := m.onErrorStop
 		return m, tea.Batch(
 			func() tea.Msg {
 				var results []*executor.QueryResult
 				for i, stmt := range stmts {
 					result, err := m.deps.Executor.Execute(context.Background(), stmt)
 					if err != nil {
-						return execMultiResultMsg{results, err, output.FormatTable, stmts[:i+1], perFmt[:i+1]}
+						if onErrorStop {
+							return execMultiResultMsg{results, err, output.FormatTable, stmts[:i+1], perFmt[:i+1], true}
+						}
+						return execMultiResultMsg{results, err, output.FormatTable, stmts[:i+1], perFmt[:i+1], false}
 					}
 					results = append(results, result)
 				}
-				return execMultiResultMsg{results, nil, output.FormatTable, stmts, perFmt}
+				return execMultiResultMsg{results, nil, output.FormatTable, stmts, perFmt, false}
 			},
 			tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
 				return execTickMsg(t)
@@ -2012,6 +2054,163 @@ func (m Model) normalizeTableNames(sql string) string {
 
 func isIdentStart(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
+}
+
+// substituteVars replaces :varname, :'varname', and :"varname" references
+// in the input SQL with the corresponding session variable values.
+// This is compatible with psql's variable substitution behavior.
+func (m Model) substituteVars(input string) string {
+	if len(m.sessionVars) == 0 {
+		return input
+	}
+
+	var result strings.Builder
+	runes := []rune(input)
+	i := 0
+	for i < len(runes) {
+		// Skip single-quoted strings (no substitution inside)
+		if runes[i] == '\'' {
+			j := i + 1
+			for j < len(runes) {
+				if runes[j] == '\'' {
+					j++
+					break
+				}
+				if runes[j] == '\\' && j+1 < len(runes) {
+					j++
+				}
+				j++
+			}
+			result.WriteString(string(runes[i:j]))
+			i = j
+			continue
+		}
+		// Skip double-quoted strings (no substitution inside)
+		if runes[i] == '"' {
+			j := i + 1
+			for j < len(runes) {
+				if runes[j] == '"' {
+					j++
+					break
+				}
+				if runes[j] == '\\' && j+1 < len(runes) {
+					j++
+				}
+				j++
+			}
+			result.WriteString(string(runes[i:j]))
+			i = j
+			continue
+		}
+		// Look for :varname, :'varname', :"varname"
+		if runes[i] == ':' {
+			// :'varname' — quoted with single quotes
+			if i+2 < len(runes) && runes[i+1] == '\'' {
+				endQ := -1
+				for k := i + 2; k < len(runes); k++ {
+					if runes[k] == '\'' {
+						endQ = k
+						break
+					}
+				}
+				if endQ != -1 {
+					varName := string(runes[i+2 : endQ])
+					if val, ok := m.sessionVars[varName]; ok {
+						// Escape single quotes within the value
+						escaped := strings.ReplaceAll(val, "'", "''")
+						result.WriteString("'" + escaped + "'")
+					} else {
+						result.WriteString(string(runes[i : endQ+1]))
+					}
+					i = endQ + 1
+					continue
+				}
+			}
+			// :"varname" — quoted with double quotes
+			if i+2 < len(runes) && runes[i+1] == '"' {
+				endQ := -1
+				for k := i + 2; k < len(runes); k++ {
+					if runes[k] == '"' {
+						endQ = k
+						break
+					}
+				}
+				if endQ != -1 {
+					varName := string(runes[i+2 : endQ])
+					if val, ok := m.sessionVars[varName]; ok {
+						// Escape double quotes within the value
+						escaped := strings.ReplaceAll(val, `"`, `\"`)
+						result.WriteString(`"` + escaped + `"`)
+					} else {
+						result.WriteString(string(runes[i : endQ+1]))
+					}
+					i = endQ + 1
+					continue
+				}
+			}
+			// :varname — plain variable reference
+			if i+1 < len(runes) && isIdentStart(runes[i+1]) {
+				j := i + 1
+				for j < len(runes) && isIdentRune(runes[j]) {
+					j++
+				}
+				varName := string(runes[i+1 : j])
+				if val, ok := m.sessionVars[varName]; ok {
+					result.WriteString(val)
+				} else {
+					result.WriteString(string(runes[i:j]))
+				}
+				i = j
+				continue
+			}
+		}
+		result.WriteRune(runes[i])
+		i++
+	}
+	return result.String()
+}
+
+func isIdentRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+}
+
+// isTransactionControl returns true if the SQL is a transaction control statement.
+func (m Model) isTransactionControl(upper string) bool {
+	return strings.HasPrefix(upper, "BEGIN") ||
+		strings.HasPrefix(upper, "START TRANSACTION") ||
+		strings.HasPrefix(upper, "COMMIT") ||
+		strings.HasPrefix(upper, "ROLLBACK")
+}
+
+// substituteVarsInText substitutes :varname references in plain text
+// (used by \echo). Unlike substituteVars, it does not skip quoted strings
+// and does not support :'varname' or :"varname" forms.
+func (m Model) substituteVarsInText(text string) string {
+	if len(m.sessionVars) == 0 {
+		return text
+	}
+	var result strings.Builder
+	runes := []rune(text)
+	i := 0
+	for i < len(runes) {
+		if runes[i] == ':' && i+1 < len(runes) && isIdentStart(runes[i+1]) {
+			j := i + 1
+			for j < len(runes) && isIdentRune(runes[j]) {
+				j++
+			}
+			varName := string(runes[i+1 : j])
+			if val, ok := m.sessionVars[varName]; ok {
+				result.WriteString(val)
+			} else {
+				result.WriteString(string(runes[i:j]))
+			}
+			i = j
+			continue
+		}
+		result.WriteRune(runes[i])
+		i++
+	}
+	return result.String()
 }
 
 func isIdentChar(r rune) bool {
@@ -2988,20 +3187,52 @@ func (m *Model) handleListViews(pattern string) {
 }
 
 // handleSet sets a session variable.
+// Supports special variables that control mysh behavior:
+//   AUTOCOMMIT   - on/off: auto-commit each statement (default: on)
+//   ON_ERROR_STOP - on/off: stop execution on error (default: off)
+//   ECHO         - all/queries/off: echo SQL before execution
+// Also supports :varname substitution in SQL (psql-compatible).
 func (m *Model) handleSet(parts []string) {
 	if len(parts) == 0 {
-		// List all variables
-		if len(m.sessionVars) == 0 {
-			m.addOutput("No session variables set. Use \\set <name> <value> to define one.")
-		} else {
-			m.addOutput("  Session variables:")
+		// List all variables, showing special ones first
+		m.addOutput("  Special variables:")
+		m.addOutput(fmt.Sprintf("   AUTOCOMMIT = %s", boolStr(m.autoCommit)))
+		m.addOutput(fmt.Sprintf("   ON_ERROR_STOP = %s", boolStr(m.onErrorStop)))
+		echoVal := "off"
+		if m.echoMode == echoAll {
+			echoVal = "all"
+		} else if m.echoMode == echoQueries {
+			echoVal = "queries"
+		}
+		m.addOutput(fmt.Sprintf("   ECHO = %s", echoVal))
+		if len(m.sessionVars) > 0 {
+			m.addOutput("  User variables:")
 			for k, v := range m.sessionVars {
 				m.addOutput(fmt.Sprintf("   %s = %s", k, v))
 			}
 		}
 		return
 	}
+	name := parts[0]
 	if len(parts) == 1 {
+		// Check special variables first
+		switch strings.ToUpper(name) {
+		case "AUTOCOMMIT":
+			m.addOutput(fmt.Sprintf("  AUTOCOMMIT = %s", boolStr(m.autoCommit)))
+			return
+		case "ON_ERROR_STOP":
+			m.addOutput(fmt.Sprintf("  ON_ERROR_STOP = %s", boolStr(m.onErrorStop)))
+			return
+		case "ECHO":
+			echoVal := "off"
+			if m.echoMode == echoAll {
+				echoVal = "all"
+			} else if m.echoMode == echoQueries {
+				echoVal = "queries"
+			}
+			m.addOutput(fmt.Sprintf("  ECHO = %s", echoVal))
+			return
+		}
 		if val, ok := m.sessionVars[parts[0]]; ok {
 			m.addOutput(fmt.Sprintf("  %s = %s", parts[0], val))
 		} else {
@@ -3009,11 +3240,41 @@ func (m *Model) handleSet(parts []string) {
 		}
 		return
 	}
+	value := strings.Join(parts[1:], " ")
+
+	// Handle special variables
+	switch strings.ToUpper(name) {
+	case "AUTOCOMMIT":
+		newVal := parseBoolValue(value, m.autoCommit)
+		m.autoCommit = newVal
+		m.addOutput(fmt.Sprintf("  AUTOCOMMIT = %s", boolStr(newVal)))
+		return
+	case "ON_ERROR_STOP":
+		newVal := parseBoolValue(value, m.onErrorStop)
+		m.onErrorStop = newVal
+		m.addOutput(fmt.Sprintf("  ON_ERROR_STOP = %s", boolStr(newVal)))
+		return
+	case "ECHO":
+		switch strings.ToLower(value) {
+		case "all":
+			m.echoMode = echoAll
+			m.addOutput("  ECHO = all")
+		case "queries":
+			m.echoMode = echoQueries
+			m.addOutput("  ECHO = queries")
+		case "off":
+			m.echoMode = echoOff
+			m.addOutput("  ECHO = off")
+		default:
+			m.addOutput(fmt.Sprintf("  Invalid ECHO value %q. Use: all, queries, off", value))
+		}
+		return
+	}
+
+	// Regular user variable
 	if m.sessionVars == nil {
 		m.sessionVars = make(map[string]string)
 	}
-	name := parts[0]
-	value := strings.Join(parts[1:], " ")
 	m.sessionVars[name] = value
 	m.addOutput(fmt.Sprintf("  Set %s = %s", name, value))
 }
@@ -3148,6 +3409,28 @@ func boolStr(b bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// echoModeT controls the ECHO special variable behavior.
+type echoModeT int
+
+const (
+	echoOff     echoModeT = iota // ECHO off (default)
+	echoAll                       // ECHO all — echo commands and queries
+	echoQueries                   // ECHO queries — echo only query text
+)
+
+// parseBoolValue parses a string as a boolean, returning the default value
+// if the string is not a recognized boolean keyword.
+func parseBoolValue(s string, defaultVal bool) bool {
+	switch strings.ToLower(s) {
+	case "on", "true", "1", "yes":
+		return true
+	case "off", "false", "0", "no":
+		return false
+	default:
+		return defaultVal
+	}
 }
 
 // handleG executes the last query (like \g in psql), optionally saving to file.
@@ -3708,7 +3991,7 @@ Backslash commands:
   \dt [pattern], \tables  List tables (optional pattern: user* or user%)
   \du, \users        List database users
   \dv [pattern], \views   List views (optional pattern)
-  \echo <text>      Echo text to output
+  \echo <text>      Echo text to output (:var substitution supported)
   \edit, \e         Open editor ($EDITOR or vi) to edit/execute SQL
   \encoding [name]  Show/set client character encoding
   \explain [analyze] <sql>  Run EXPLAIN on SQL (add analyze to execute)
@@ -3747,6 +4030,9 @@ Backslash commands:
   \session del <n>  Delete a saved session
   \sf <func>        Show function definition
   \set [name value] Show/set session variables
+                       Special: AUTOCOMMIT, ON_ERROR_STOP, ECHO
+                       Use :varname in SQL to substitute variable value
+                       Use :'varname' for quoted substitution
   \slow [seconds]   Set/show slow query warning threshold (0 = disabled)
   \source <file>    Execute SQL from file
   \status, \s       Show connection status

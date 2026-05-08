@@ -50,6 +50,10 @@ func newTestModel() Model {
 		errorStyle:   lipgloss.NewStyle(),
 		compStyle:    lipgloss.NewStyle(),
 		compSelStyle: lipgloss.NewStyle(),
+		sessionVars:  make(map[string]string),
+		autoCommit:   true,
+		onErrorStop:  false,
+		echoMode:     echoOff,
 	}
 }
 
@@ -1065,15 +1069,16 @@ func TestBackslashCommand_SetList(t *testing.T) {
 	m.ed.Insert("\\set")
 	model, _ := m.handleEnter()
 	updated := model.(Model)
+	// \set without args now always shows special variables
 	found := false
 	for _, line := range updated.output {
-		if strings.Contains(line, "No session variables") {
+		if strings.Contains(line, "AUTOCOMMIT") || strings.Contains(line, "Special variables") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("expected 'No session variables' output after \\set without args")
+		t.Error("expected 'AUTOCOMMIT' or 'Special variables' output after \\set without args")
 	}
 }
 
@@ -1094,6 +1099,102 @@ func TestBackslashCommand_SetAndGet(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected 'hello' in output after \\get myvar")
+	}
+}
+
+func TestBackslashCommand_SetAutocommit(t *testing.T) {
+	m := newTestModel()
+	// Default is on
+	if !m.autoCommit {
+		t.Error("expected autoCommit to be on by default")
+	}
+	// Turn off
+	m.ed.Insert("\\set AUTOCOMMIT off")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.autoCommit {
+		t.Error("expected autoCommit to be off after \\set AUTOCOMMIT off")
+	}
+	// Turn on
+	updated.ed.Insert("\\set AUTOCOMMIT on")
+	model2, _ := updated.handleEnter()
+	updated2 := model2.(Model)
+	if !updated2.autoCommit {
+		t.Error("expected autoCommit to be on after \\set AUTOCOMMIT on")
+	}
+}
+
+func TestBackslashCommand_SetOnErrorStop(t *testing.T) {
+	m := newTestModel()
+	if m.onErrorStop {
+		t.Error("expected onErrorStop to be off by default")
+	}
+	m.ed.Insert("\\set ON_ERROR_STOP on")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if !updated.onErrorStop {
+		t.Error("expected onErrorStop to be on after \\set ON_ERROR_STOP on")
+	}
+}
+
+func TestBackslashCommand_SetEcho(t *testing.T) {
+	m := newTestModel()
+	if m.echoMode != echoOff {
+		t.Error("expected echoMode to be off by default")
+	}
+	m.ed.Insert("\\set ECHO queries")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.echoMode != echoQueries {
+		t.Error("expected echoMode to be queries after \\set ECHO queries")
+	}
+	m.ed.Insert("\\set ECHO all")
+	model, _ = m.handleEnter()
+	updated = model.(Model)
+	if updated.echoMode != echoAll {
+		t.Error("expected echoMode to be all after \\set ECHO all")
+	}
+	m.ed.Insert("\\set ECHO off")
+	model, _ = m.handleEnter()
+	updated = model.(Model)
+	if updated.echoMode != echoOff {
+		t.Error("expected echoMode to be off after \\set ECHO off")
+	}
+}
+
+func TestSubstituteVars(t *testing.T) {
+	m := newTestModel()
+	m.sessionVars = map[string]string{
+		"dbname": "testdb",
+		"limit":  "10",
+	}
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"SELECT * FROM :dbname LIMIT :limit", "SELECT * FROM testdb LIMIT 10"},
+		{"SELECT * FROM :'dbname' LIMIT :limit", "SELECT * FROM 'testdb' LIMIT 10"},
+		{`SELECT * FROM :"dbname"`, `SELECT * FROM "testdb"`},
+		{"SELECT ':not_a_var' AS x", "SELECT ':not_a_var' AS x"},  // inside quotes, no sub
+		{"no vars here", "no vars here"},
+		{":missing_var", ":missing_var"}, // unknown var, keep as-is
+	}
+	for _, tt := range tests {
+		result := m.substituteVars(tt.input)
+		if result != tt.expected {
+			t.Errorf("substituteVars(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestSubstituteVarsInText(t *testing.T) {
+	m := newTestModel()
+	m.sessionVars = map[string]string{
+		"name": "Alice",
+	}
+	result := m.substituteVarsInText("Hello :name!")
+	if result != "Hello Alice!" {
+		t.Errorf("substituteVarsInText = %q, want %q", result, "Hello Alice!")
 	}
 }
 
