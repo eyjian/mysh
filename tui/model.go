@@ -428,6 +428,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		return m.handleEnter()
 
+	case tea.KeyCtrlJ:
+		// Ctrl+J (0x0A, \n) arrives when pasting multi-line text without
+		// bracketed paste. Insert a newline character so the pasted text
+		// preserves its original line structure in the editor.
+		m.ed.Insert("\n")
+		m.showComp = false
+		return m, nil
+
 	case tea.KeyTab:
 		return m.handleTab()
 
@@ -552,7 +560,53 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		m.ed.Insert(string(msg.Runes))
+		// Normalize line endings in pasted text:
+		// Many terminals send only \r (CR) as the line break inside a
+		// bracketed paste (e.g. macOS Terminal, iTerm2). Convert any
+		// \r\n or lone \r into \n so the editor stores a consistent
+		// representation.
+		runes := msg.Runes
+		var b strings.Builder
+		b.Grow(len(runes))
+		for i := 0; i < len(runes); i++ {
+			r := runes[i]
+			if r == '\r' {
+				// Collapse \r\n into a single \n
+				if i+1 < len(runes) && runes[i+1] == '\n' {
+					i++
+				}
+				b.WriteRune('\n')
+			} else {
+				b.WriteRune(r)
+			}
+		}
+		insertText := b.String()
+
+		// Multi-line paste: process each line through the multiline
+		// accumulation mechanism (like MySQL CLI). This ensures each
+		// line is displayed in the output area with the appropriate
+		// prompt, and the last line remains in the editor for editing.
+		lines := strings.Split(insertText, "\n")
+		if len(lines) > 1 {
+			// First line uses the primary prompt
+			firstLine := lines[0]
+			m.addOutput(m.prompt + m.highlightDisplayEntry(firstLine))
+			m.multilineParts = append(m.multilineParts, firstLine)
+			m.multiline = true
+
+			// Middle lines use the continuation prompt
+			for i := 1; i < len(lines)-1; i++ {
+				m.addOutput(m.mlPrompt + m.highlightDisplayEntry(lines[i]))
+				m.multilineParts = append(m.multilineParts, lines[i])
+			}
+
+			// Last line stays in the editor for editing
+			lastLine := lines[len(lines)-1]
+			m.ed.SetText(lastLine)
+		} else {
+			// Single-line paste: just insert into editor
+			m.ed.Insert(insertText)
+		}
 		m.showComp = false
 		return m, nil
 	}
@@ -575,6 +629,9 @@ func (m Model) handleCtrlRune(r rune) (tea.Model, tea.Cmd) {
 		return m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlD})
 	case 8: // Ctrl+H — backspace
 		m.ed.Backspace(1)
+		m.showComp = false
+	case 10: // \n — insert newline (handles paste without bracketed paste)
+		m.ed.Insert("\n")
 		m.showComp = false
 	case 11: // Ctrl+K — kill to end of line
 		pos := m.ed.CursorPos()
@@ -788,6 +845,9 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	}
 
 	input := m.ed.Text()
+	// Normalize embedded newlines: multi-line pasted text may contain \n
+	// characters; replace them with spaces for SQL execution (like MySQL CLI).
+	input = strings.ReplaceAll(input, "\n", " ")
 
 	// Empty input + disconnected: auto-reconnect (like MySQL CLI)
 	if strings.TrimSpace(input) == "" && !m.connected {
@@ -2053,7 +2113,9 @@ func (m Model) View() string {
 		sb.WriteString(m.promptStyle.Render(currentPrompt))
 
 		input := m.ed.Text()
-		cursorPos := m.ed.CursorPos()
+		cursorLine := m.ed.CurrentLine()
+		cursorCol := m.ed.CursorColumn()
+		lines := strings.Split(input, "\n")
 
 		// Cursor: overlay on character at cursor position using reverse video
 		cursorStyle := lipgloss.NewStyle().Reverse(true)
@@ -2065,41 +2127,55 @@ func (m Model) View() string {
 				sb.WriteString(" ")
 			}
 		} else {
-			runes := []rune(input)
-			beforeText := string(runes[:cursorPos])
+			for i, line := range lines {
+				if i > 0 {
+					sb.WriteString("\n")
+					sb.WriteString(m.promptStyle.Render(m.mlPrompt))
+				}
 
-			if m.cursorOn && cursorPos < len(runes) {
-			// Cursor overlays the character at cursorPos
-			cursorChar := string(runes[cursorPos])
-			afterText := string(runes[cursorPos+1:])
-			if m.deps.Highlighter != nil {
-				sb.WriteString(m.deps.Highlighter.Highlight(beforeText))
-				sb.WriteString(cursorStyle.Render(cursorChar))
-				sb.WriteString(m.deps.Highlighter.Highlight(afterText))
-			} else {
-				sb.WriteString(beforeText)
-				sb.WriteString(cursorStyle.Render(cursorChar))
-				sb.WriteString(afterText)
+				lineRunes := []rune(line)
+
+				if i == cursorLine {
+					// This line contains the cursor
+					if m.cursorOn && cursorCol < len(lineRunes) {
+						// Cursor overlays a character on this line
+						beforeText := string(lineRunes[:cursorCol])
+						cursorChar := string(lineRunes[cursorCol])
+						afterText := string(lineRunes[cursorCol+1:])
+						if m.deps.Highlighter != nil {
+							sb.WriteString(m.deps.Highlighter.Highlight(beforeText))
+							sb.WriteString(cursorStyle.Render(cursorChar))
+							sb.WriteString(m.deps.Highlighter.Highlight(afterText))
+						} else {
+							sb.WriteString(beforeText)
+							sb.WriteString(cursorStyle.Render(cursorChar))
+							sb.WriteString(afterText)
+						}
+					} else if m.cursorOn && cursorCol == len(lineRunes) {
+						// Cursor at end of this line — block cursor on empty space
+						if m.deps.Highlighter != nil {
+							sb.WriteString(m.deps.Highlighter.Highlight(line))
+						} else {
+							sb.WriteString(line)
+						}
+						sb.WriteString(cursorStyle.Render(" "))
+					} else if !m.cursorOn {
+						// Cursor hidden (blink off) on this line
+						if m.deps.Highlighter != nil {
+							sb.WriteString(m.deps.Highlighter.Highlight(line))
+						} else {
+							sb.WriteString(line)
+						}
+					}
+				} else {
+					// Non-cursor line — just highlight
+					if m.deps.Highlighter != nil {
+						sb.WriteString(m.deps.Highlighter.Highlight(line))
+					} else {
+						sb.WriteString(line)
+					}
+				}
 			}
-		} else if m.cursorOn && cursorPos == len(runes) {
-			// Cursor at end of text — block cursor on empty space
-			if m.deps.Highlighter != nil {
-				sb.WriteString(m.deps.Highlighter.Highlight(beforeText))
-			} else {
-				sb.WriteString(beforeText)
-			}
-			sb.WriteString(cursorStyle.Render(" "))
-		} else {
-			// Cursor hidden (blink off)
-			afterText := string(runes[cursorPos:])
-			if m.deps.Highlighter != nil {
-				sb.WriteString(m.deps.Highlighter.Highlight(beforeText))
-				sb.WriteString(m.deps.Highlighter.Highlight(afterText))
-			} else {
-				sb.WriteString(beforeText)
-				sb.WriteString(afterText)
-			}
-		}
 		}
 	}
 
@@ -2633,6 +2709,7 @@ func (m Model) runFavorite(name string) (tea.Model, tea.Cmd) {
 }
 
 // handleListDatabases lists all databases (like psql's \l or MySQL's SHOW DATABASES).
+// For PostgreSQL, also shows schemas in the current database.
 func (m *Model) handleListDatabases() {
 	if m.deps.Pool == nil {
 		m.addOutput("No connection available.")
@@ -2643,13 +2720,39 @@ func (m *Model) handleListDatabases() {
 		m.addOutput(fmt.Sprintf("ERROR: %s", err))
 		return
 	}
+
 	if len(dbs) == 0 {
 		m.addOutput("No databases found.")
-		return
+	} else {
+		m.addOutput(fmt.Sprintf("  List of databases (%d):", len(dbs)))
+		curDB := m.deps.Pool.CurrentDB()
+		for _, db := range dbs {
+			if db == curDB {
+				m.addOutput(fmt.Sprintf("   %s  [current]", db))
+			} else {
+				m.addOutput(fmt.Sprintf("   %s", db))
+			}
+		}
 	}
-	m.addOutput(fmt.Sprintf("  List of databases (%d):", len(dbs)))
-	for _, db := range dbs {
-		m.addOutput(fmt.Sprintf("   %s", db))
+
+	// For PostgreSQL, also show schemas in the current database
+	if m.deps.Pool.DriverName() == "postgres" {
+		schemas, err := m.deps.Pool.Schemas()
+		if err != nil {
+			return
+		}
+		if len(schemas) > 0 {
+			currentSchema := m.deps.Pool.CurrentSchema()
+			m.addOutput("")
+			m.addOutput(fmt.Sprintf("  Schemas in database %q (%d):", m.deps.Pool.CurrentDB(), len(schemas)))
+			for _, s := range schemas {
+				if s == currentSchema {
+					m.addOutput(fmt.Sprintf("   %s  [current]", s))
+				} else {
+					m.addOutput(fmt.Sprintf("   %s", s))
+				}
+			}
+		}
 	}
 }
 
@@ -2659,8 +2762,8 @@ func (m *Model) handleListTables(pattern string) {
 		m.addOutput("No connection available.")
 		return
 	}
-	db := m.deps.Pool.CurrentDB()
-	tables, err := m.deps.Pool.Tables(db)
+	schema := m.deps.Pool.CurrentSchema()
+	tables, err := m.deps.Pool.Tables(schema)
 	if err != nil {
 		m.addOutput(fmt.Sprintf("ERROR: %s", err))
 		return
@@ -2693,16 +2796,16 @@ func (m *Model) handleListTables(pattern string) {
 
 	if len(tables) == 0 {
 		if pattern != "" {
-			m.addOutput(fmt.Sprintf("No tables found matching %q in database %q.", pattern, db))
+			m.addOutput(fmt.Sprintf("No tables found matching %q in schema %q.", pattern, schema))
 		} else {
-			m.addOutput(fmt.Sprintf("No tables found in database %q.", db))
+			m.addOutput(fmt.Sprintf("No tables found in schema %q.", schema))
 		}
 		return
 	}
 
-	label := fmt.Sprintf("  List of relations (%d) in %s:", len(tables), db)
+	label := fmt.Sprintf("  List of relations (%d) in %s:", len(tables), schema)
 	if pattern != "" {
-		label = fmt.Sprintf("  List of relations (%d) matching %q in %s:", len(tables), pattern, db)
+		label = fmt.Sprintf("  List of relations (%d) matching %q in %s:", len(tables), pattern, schema)
 	}
 	m.addOutput(label)
 	for _, t := range tables {
@@ -2784,8 +2887,7 @@ func (m *Model) handleListIndexes(table string) {
 		m.addOutput("No connection available.")
 		return
 	}
-	db := m.deps.Pool.CurrentDB()
-	indexes, err := m.deps.Pool.ListIndexes(db, table)
+	indexes, err := m.deps.Pool.ListIndexes(m.deps.Pool.CurrentSchema(), table)
 	if err != nil {
 		m.addOutput(fmt.Sprintf("ERROR: %s", err))
 		return
@@ -2841,7 +2943,7 @@ func (m *Model) handleListViews(pattern string) {
 		m.addOutput("No connection available.")
 		return
 	}
-	db := m.deps.Pool.CurrentDB()
+	db := m.deps.Pool.CurrentSchema()
 	views, err := m.deps.Pool.Views(db)
 	if err != nil {
 		m.addOutput(fmt.Sprintf("ERROR: %s", err))
@@ -3136,7 +3238,7 @@ func (m *Model) handleShowFunction(functionName string) {
 		m.addOutput("No connection available.")
 		return
 	}
-	db := m.deps.Pool.CurrentDB()
+	db := m.deps.Pool.CurrentSchema()
 	def, err := m.deps.Pool.ShowFunction(db, functionName)
 	if err != nil {
 		m.addOutput(fmt.Sprintf("ERROR: %s", err))
@@ -3156,7 +3258,7 @@ func (m *Model) handlePrivileges(tableName string) {
 		m.addOutput("No connection available.")
 		return
 	}
-	db := m.deps.Pool.CurrentDB()
+	db := m.deps.Pool.CurrentSchema()
 	privileges, err := m.deps.Pool.TablePrivileges(db, tableName)
 	if err != nil {
 		m.addOutput(fmt.Sprintf("ERROR: %s", err))
@@ -3268,7 +3370,7 @@ func (m *Model) handleDesc(parts []string) {
 		mode = strings.ToLower(parts[1])
 	}
 
-	db := m.deps.Pool.CurrentDB()
+	db := m.deps.Pool.CurrentSchema()
 
 	switch mode {
 	case "create":

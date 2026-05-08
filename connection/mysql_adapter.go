@@ -32,6 +32,11 @@ func (mysqlAdapter) CurrentDB(db *sql.DB) (string, error) {
 	return name, err
 }
 
+func (mysqlAdapter) CurrentSchema(db *sql.DB) (string, error) {
+	// In MySQL, schemas are databases.
+	return mysqlAdapter{}.CurrentDB(db)
+}
+
 func (mysqlAdapter) UseDB(ctx context.Context, db *sql.DB, name string) error {
 	_, err := db.ExecContext(ctx, "USE `"+name+"`")
 	return err

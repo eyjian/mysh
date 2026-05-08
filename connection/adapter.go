@@ -20,8 +20,13 @@ type DBAdapter interface {
 	// QuoteIdentifier quotes a database identifier (table, column, schema name).
 	QuoteIdentifier(name string) string
 
-	// CurrentDB returns the name of the currently selected database/schema.
+	// CurrentDB returns the name of the currently selected database.
 	CurrentDB(db *sql.DB) (string, error)
+
+	// CurrentSchema returns the name of the currently active schema.
+	// For MySQL this is the same as CurrentDB; for PostgreSQL it returns
+	// the current search_path schema (typically "public").
+	CurrentSchema(db *sql.DB) (string, error)
 
 	// UseDB switches to the specified database/schema.
 	UseDB(ctx context.Context, db *sql.DB, name string) error

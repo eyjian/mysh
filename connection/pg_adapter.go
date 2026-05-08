@@ -79,6 +79,12 @@ func (pgAdapter) CurrentDB(db *sql.DB) (string, error) {
 	return name, err
 }
 
+func (pgAdapter) CurrentSchema(db *sql.DB) (string, error) {
+	var name string
+	err := db.QueryRow("SELECT current_schema()").Scan(&name)
+	return name, err
+}
+
 func (pgAdapter) UseDB(ctx context.Context, db *sql.DB, name string) error {
 	_, err := db.ExecContext(ctx, `SET search_path TO "`+strings.ReplaceAll(name, `"`, `""`)+`"`)
 	return err
@@ -180,30 +186,200 @@ func (pgAdapter) ShowCreateTable(db *sql.DB, schema, table string) (string, erro
 	if schema == "" {
 		schema = "public"
 	}
-	// PostgreSQL has no direct SHOW CREATE TABLE; reconstruct from pg_catalog.
-	query := `SELECT
-	'CREATE TABLE ' || quote_ident(c.relname) || ' (' ||
-	string_agg(
-		quote_ident(a.attname) || ' ' || pg_catalog.format_type(a.atttypid, a.atttypmod) ||
-		CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END ||
-		CASE WHEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) IS NOT NULL
-			THEN ' DEFAULT ' || pg_catalog.pg_get_expr(d.adbin, d.adrelid)
-			ELSE '' END,
-		E',\n '
-	) || E');'
+
+	// 1. Get column definitions
+	colQuery := `SELECT a.attname,
+	       pg_catalog.format_type(a.atttypid, a.atttypmod),
+	       NOT a.attnotnull,
+	       COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid), '')
 	FROM pg_class c
 	JOIN pg_namespace n ON n.oid = c.relnamespace
 	JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
 	LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
 	WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'
-	GROUP BY c.relname`
+	ORDER BY a.attnum`
 
-	var ddl string
-	err := db.QueryRow(query, schema, table).Scan(&ddl)
+	colRows, err := db.Query(colQuery, schema, table)
 	if err != nil {
-		return "", fmt.Errorf("failed to get table DDL: %w", err)
+		return "", fmt.Errorf("failed to get columns: %w", err)
 	}
-	return ddl, nil
+	defer colRows.Close()
+
+	type colDef struct {
+		name     string
+		typ      string
+		nullable bool
+		defaults string
+	}
+	var columns []colDef
+	for colRows.Next() {
+		var c colDef
+		if err := colRows.Scan(&c.name, &c.typ, &c.nullable, &c.defaults); err != nil {
+			return "", fmt.Errorf("failed to scan column: %w", err)
+		}
+		columns = append(columns, c)
+	}
+	if err := colRows.Err(); err != nil {
+		return "", err
+	}
+	if len(columns) == 0 {
+		return "", fmt.Errorf("table %s.%s not found", schema, table)
+	}
+
+	// 2. Get primary key columns
+	pkSet := pgGetPKColumns(db, schema, table)        // set of PK column names
+	pkOrder := pgGetPKColumnsOrdered(db, schema, table) // ordered PK columns
+	isSinglePK := len(pkOrder) == 1
+
+	// 3. Get indexes (unique + non-unique)
+	indexes := pgGetIndexes(db, schema, table)
+
+	// 4. Assemble DDL
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("CREATE TABLE %s.%s (", quotePGIdent(schema), quotePGIdent(table)))
+
+	var lines []string
+	for _, c := range columns {
+		var line strings.Builder
+		line.WriteString("  ")
+		line.WriteString(quotePGIdent(c.name))
+		line.WriteByte(' ')
+		line.WriteString(c.typ)
+		if !c.nullable {
+			line.WriteString(" NOT NULL")
+		}
+		if c.defaults != "" {
+			line.WriteString(" DEFAULT ")
+			line.WriteString(c.defaults)
+		}
+		// Single-column PK: annotate inline
+		if isSinglePK && pkSet[c.name] {
+			line.WriteString(" PRIMARY KEY")
+		}
+		lines = append(lines, line.String())
+	}
+
+	// Composite PK: add separate constraint line
+	if len(pkOrder) > 1 {
+		quoted := make([]string, len(pkOrder))
+		for i, col := range pkOrder {
+			quoted[i] = quotePGIdent(col)
+		}
+		lines = append(lines, fmt.Sprintf("  CONSTRAINT %s PRIMARY KEY (%s)",
+			quotePGIdent(table+"_pkey"), strings.Join(quoted, ", ")))
+	}
+
+	for i, line := range lines {
+		b.WriteString("\n")
+		b.WriteString(line)
+		if i < len(lines)-1 {
+			b.WriteByte(',')
+		}
+	}
+
+	b.WriteString("\n)")
+
+	// Add indexes as comments after the CREATE TABLE
+	for _, idx := range indexes {
+		b.WriteString("\n-- ")
+		if idx.unique {
+			b.WriteString("UNIQUE ")
+		}
+		b.WriteString(fmt.Sprintf("INDEX %s ON %s.%s (%s)", quotePGIdent(idx.name), quotePGIdent(schema), quotePGIdent(table), idx.columns))
+	}
+
+	b.WriteByte(';')
+	return b.String(), nil
+}
+
+// quotePGIdent quotes a PostgreSQL identifier.
+func quotePGIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// pgGetPKColumns returns a set of primary key column names.
+func pgGetPKColumns(db *sql.DB, schema, table string) map[string]bool {
+	rows, err := db.Query(`SELECT kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+			AND tc.table_schema = $1 AND tc.table_name = $2
+		ORDER BY kcu.ordinal_position`, schema, table)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	result := make(map[string]bool)
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			return nil
+		}
+		result[col] = true
+	}
+	return result
+}
+
+// pgGetPKColumnsOrdered returns primary key columns in order.
+func pgGetPKColumnsOrdered(db *sql.DB, schema, table string) []string {
+	rows, err := db.Query(`SELECT kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+			AND tc.table_schema = $1 AND tc.table_name = $2
+		ORDER BY kcu.ordinal_position`, schema, table)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var cols []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			return nil
+		}
+		cols = append(cols, col)
+	}
+	return cols
+}
+
+type pgIndexInfo struct {
+	name    string
+	columns string
+	unique  bool
+}
+
+// pgGetIndexes returns index information for a table.
+func pgGetIndexes(db *sql.DB, schema, table string) []pgIndexInfo {
+	rows, err := db.Query(`SELECT i.relname,
+	       string_agg(a.attname, ', ' ORDER BY array_position(ix.indkey, a.attnum)),
+	       ix.indisunique
+	FROM pg_class t
+	JOIN pg_namespace n ON n.oid = t.relnamespace
+	JOIN pg_index ix ON ix.indrelid = t.oid
+	JOIN pg_class i ON i.oid = ix.indexrelid
+	JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+	WHERE n.nspname = $1 AND t.relname = $2
+	GROUP BY i.relname, ix.indisunique
+	ORDER BY i.relname`, schema, table)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var indexes []pgIndexInfo
+	for rows.Next() {
+		var idx pgIndexInfo
+		if err := rows.Scan(&idx.name, &idx.columns, &idx.unique); err != nil {
+			return nil
+		}
+		indexes = append(indexes, idx)
+	}
+	return indexes
 }
 
 func (pgAdapter) ShowIndexes(db *sql.DB, schema, table string) ([]TableIndexInfo, error) {

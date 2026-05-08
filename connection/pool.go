@@ -233,6 +233,21 @@ func (p *Pool) CurrentDB() string {
 	return name
 }
 
+// CurrentSchema returns the currently active schema name.
+// For MySQL this is the same as CurrentDB; for PostgreSQL it is typically "public".
+func (p *Pool) CurrentSchema() string {
+	name, err := p.adapter.CurrentSchema(p.db)
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
+// DriverName returns the driver name of the current adapter (e.g., "mysql", "postgres").
+func (p *Pool) DriverName() string {
+	return p.adapter.DriverName()
+}
+
 // UseDB switches the current database.
 func (p *Pool) UseDB(ctx context.Context, dbName string) error {
 	return p.adapter.UseDB(ctx, p.db, dbName)
