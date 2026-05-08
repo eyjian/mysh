@@ -56,10 +56,13 @@ func (c *Cache) Refresh() error {
 	}
 	c.databases = dbs
 
-	// Load tables for current database
-	currentDB := c.pool.CurrentDB()
-	if currentDB != "" {
-		if err := c.loadDatabaseMetadata(currentDB); err != nil {
+	// Load tables for current schema
+	// Use CurrentSchema() instead of CurrentDB() because:
+	// - MySQL: CurrentSchema() == CurrentDB() (same concept)
+	// - PostgreSQL: CurrentDB() returns database name, but Tables() expects schema name (e.g. "public")
+	currentSchema := c.pool.CurrentSchema()
+	if currentSchema != "" {
+		if err := c.loadDatabaseMetadata(currentSchema); err != nil {
 			// Log but don't fail
 			c.dirty = true
 		}
