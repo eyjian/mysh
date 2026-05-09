@@ -122,6 +122,127 @@ mysh> SELECT id, name
     -> WHERE age > 18;
 ```
 
+### 使用示例
+
+#### 查询与检查
+
+```sql
+-- 列出数据库和表
+mysh> \l
+mysh> \dt
+mysh> \dt user*                      -- 按模式过滤表名
+
+-- 查看表结构
+mysh> \desc users                    -- 列概览
+mysh> \desc users full               -- 完整信息（引擎、字符集等）
+mysh> \desc users indexes            -- 查看索引
+mysh> \desc users create             -- 显示 CREATE TABLE 语句
+
+-- 不同输出格式的查询
+mysh> SELECT * FROM users LIMIT 5;   -- 表格（默认）
+mysh> SELECT * FROM users LIMIT 5\G  -- 垂直格式（每列一行）
+mysh> SELECT * FROM users LIMIT 5\j  -- JSON 数组
+mysh> SELECT * FROM users LIMIT 5\m  -- Markdown 表格
+```
+
+#### 会话变量（兼容 psql）
+
+```sql
+-- 设置变量，在 SQL 中用 :varname 替换
+mysh> \set dbname testdb
+mysh> \set limit 10
+mysh> SELECT * FROM :'dbname' LIMIT :limit;
+-- 实际执行: SELECT * FROM 'testdb' LIMIT 10
+
+-- 查看所有变量
+mysh> \set
+  Special variables:
+   AUTOCOMMIT = on
+   ON_ERROR_STOP = off
+   ECHO = off
+
+-- 通过特殊变量控制行为
+mysh> \set AUTOCOMMIT off            -- 每条语句前自动 BEGIN
+mysh> \set ON_ERROR_STOP on          -- 遇错即停
+mysh> \set ECHO queries              -- 显示变量替换后的 SQL
+
+-- \echo 支持变量替换
+mysh> \set name Alice
+mysh> \echo Hello :name!
+Hello Alice!
+
+-- 交互式输入变量
+mysh> \prompt name 请输入名字：
+-- （用户输入值后，存储到 :name 变量）
+```
+
+#### 导出与管道
+
+```sql
+-- 导出查询结果
+mysh> SELECT * FROM users;
+mysh> \export ~/users.csv            -- 根据扩展名自动推断格式
+mysh> \export ~/users.json json
+mysh> \export ~/report.md markdown
+
+-- 将结果管道到系统命令
+mysh> SELECT * FROM users;
+mysh> \pipe grep admin              -- 通过 grep 过滤结果
+mysh> \pipe grep '2025-03-27 09'    -- 含空格的模式用引号包裹
+mysh> \pipe wc -l                   -- 统计结果行数
+mysh> \pipe sort -k2                -- 按第二列排序
+
+-- 复制内容（无剪贴板工具时直接输出到终端）
+mysh> \copy result                   -- 复制上次结果为 TSV
+mysh> \copy query                    -- 复制上次执行的 SQL
+mysh> \copy sql                      -- 复制当前输入或上次 SQL
+```
+
+#### 监控与自动化
+
+```sql
+-- 实时监控查询
+mysh> \watch 2 SELECT COUNT(*) FROM processes;
+mysh> \watch 5                       -- 每 5 秒重执行上次查询
+
+-- 从文件执行 SQL
+mysh> \source /path/to/init.sql
+
+-- 不离开 mysh 执行系统命令
+mysh> \sys date
+mysh> \! ls -la ~/backups/
+```
+
+#### 收藏查询
+
+```sql
+-- 将上次执行的查询保存为收藏
+-- 语法：\fav + <名称> [描述]
+--   名称 — 标识此收藏的唯一名称
+--   描述 — 可选，说明该查询的用途
+mysh> SELECT * FROM users WHERE status = 'active' ORDER BY created_at DESC LIMIT 10;
+mysh> \fav + active_users 前10个活跃用户
+mysh> \fav + daily_stats                  -- 描述是可选的
+
+-- 列出所有收藏
+mysh> \fav
+  active_users  | 前10个活跃用户
+
+-- 查看收藏的 SQL（填入输入缓冲区，按 Enter 即可执行）
+mysh> \fav active_users
+  Favorite: active_users  (前10个活跃用户)
+● mysh> SELECT * FROM users WHERE status = 'active' ORDER BY created_at DESC LIMIT 10
+
+-- 执行已收藏的查询
+mysh> \fav run active_users
+→ fav active_users: SELECT * FROM users WHERE status = 'active' ...
+
+-- 删除收藏
+mysh> \fav - active_users
+
+-- 收藏跨会话持久保存在 ~/.mysh_favorites.yaml 中（最多 1000 条，LRU 淘汰）
+```
+
 ### 事务支持
 
 mysh 支持显式事务，事务期间使用专用连接绑定：
@@ -296,23 +417,24 @@ sessions:
 | `\clear`, `\c` | 清屏 |
 | `\connect <dsn>` | 连接数据库（user@host:port/db 或仅 db） |
 | `\conninfo` | 显示详细连接信息（主机、端口、用户、驱动） |
-| `\copy <what>` | 复制到剪贴板（result, query, sql） |
+| `\copy <what>` | 复制到剪贴板或输出到终端（result, query, sql） |
 | `\desc <t> [mode]` | 查看表结构（无参数=列出表；columns, full, indexes, create） |
 | `\di [table]`, `\indexes` | 列出索引（可选表名过滤） |
 | `\dn`, `\schemas` | 列出模式（MySQL: 数据库，PostgreSQL: schemas） |
 | `\dt [pattern]`, `\tables` | 列出表（支持模式匹配：user\* 或 user%） |
 | `\du`, `\users` | 列出数据库用户 |
 | `\dv [pattern]`, `\views` | 列出视图（支持模式匹配） |
-| `\echo <text>` | 输出文本到界面 |
+| `\echo <text>` | 输出文本到界面（支持 `:var` 变量替换） |
 | `\edit`, `\e` | 打开外部编辑器编辑/执行 SQL |
 | `\encoding [name]` | 查看/设置客户端字符编码 |
 | `\explain [analyze] <sql>` | 执行 EXPLAIN（加 analyze 则实际运行） |
 | `\export <file> [fmt]` | 导出最后一次查询结果到文件（csv, json, markdown） |
-| `\fav`, `\favorites` | 列出收藏查询 |
-| `\fav <name>` | 执行已收藏的查询 |
-| `\fav + <name> [desc]` | 将最后一次查询保存为收藏 |
+| `\fav`, `\favorites` | 列出收藏查询（保存在 ~/.mysh_favorites.yaml，最多 1000 条，LRU 淘汰） |
+| `\fav <name>` | 查看收藏的 SQL 并填入输入缓冲区（按 Enter 执行） |
+| `\fav + <name> [desc]` | 将最后一次查询保存为收藏（name：收藏名称，desc：可选描述） |
 | `\fav - <name>` | 删除收藏 |
-| `\fav show <name>` | 查看收藏的 SQL |
+| `\fav run <name>` | 执行已收藏的查询 |
+| `\fav show <name>` | 查看收藏的 SQL（同 \fav \<name\>） |
 | `\format [type]` | 设置/查看输出格式（table, vertical, json, markdown） |
 | `\g [file]` | 执行上次查询，可选保存到文件 |
 | `\get <name>` | 查看会话变量值 |
@@ -335,7 +457,7 @@ sessions:
 | `\session save <name>` | 保存当前连接为会话 |
 | `\session del <name>` | 删除已保存会话 |
 | `\sf <func>` | 显示函数定义 |
-| `\set [name value]` | 查看/设置会话变量 |
+| `\set [name value]` | 查看/设置会话变量。特殊变量：`AUTOCOMMIT`、`ON_ERROR_STOP`、`ECHO`。SQL 中用 `:varname` 替换变量值 |
 | `\slow [seconds]` | 设置/查看慢查询警告阈值（0 = 禁用） |
 | `\source <file>` | 从文件执行 SQL |
 | `\status`, `\s` | 显示连接状态 |

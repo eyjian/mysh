@@ -109,7 +109,8 @@ type Model struct {
 	tempAliases map[string]string // session-only aliases
 
 	// Favorites state
-	tempFavorites map[string]config.FavoriteConfig // session-only favorites
+	persistedFavorites map[string]config.FavoriteConfig // favorites loaded from file
+	tempFavorites      map[string]config.FavoriteConfig // session-only favorites (save failed)
 
 	// Pagination state (query results)
 	pagedResult *executor.QueryResult // result being paginated (nil = not paginating)
@@ -187,6 +188,17 @@ func NewModel(deps Dependencies) Model {
 		compSelStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62")).Bold(true),
 	}
 	_ = cfg.Theme // theme is used via Highlighter
+
+	// Migrate favorites from main config to standalone file (if needed)
+	_ = config.MigrateFavoritesFromConfig(cfg)
+
+	// Load persisted favorites from standalone file
+	persistedFavs, _ := config.LoadFavorites()
+	if persistedFavs == nil {
+		persistedFavs = make(map[string]config.FavoriteConfig)
+	}
+	m.persistedFavorites = persistedFavs
+
 	return m
 }
 
@@ -968,12 +980,15 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 	// Echo the command to output area before clearing input
 	m.addOutput(m.prompt + cmd)
+
+	// Save the current input buffer before clearing, so \copy sql can access it
+	inputBuffer := m.ed.Text()
 	m.ed.Clear()
 	m.multiline = false
 
 	// Save to history so Up/Down can recall backslash commands
 	// (done after command processing to avoid current command appearing in \history)
-	parts := strings.Fields(cmd)
+	parts := splitArgs(cmd)
 	command := parts[0]
 
 	// Strip trailing semicolons from arguments for most commands
@@ -1223,6 +1238,12 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 				} else {
 					m.deleteFavorite(parts[2])
 				}
+			case "run", "exec":
+				if len(parts) < 3 {
+					m.addOutput("Usage: \\fav run <name>")
+				} else {
+					return m.runFavorite(parts[2])
+				}
 			case "show":
 				if len(parts) < 3 {
 					m.addOutput("Usage: \\fav show <name>")
@@ -1230,8 +1251,8 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 					m.showFavorite(parts[2])
 				}
 			default:
-				// Run a favorite by name
-				return m.runFavorite(parts[1])
+				// Show favorite SQL by name (safe default)
+				m.showFavorite(parts[1])
 			}
 		}
 
@@ -1311,7 +1332,7 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 			m.addOutput("  query   Copy last executed SQL statement")
 			m.addOutput("  sql     Copy current input buffer")
 		} else {
-			m.handleCopy(parts[1])
+			m.handleCopy(parts[1], inputBuffer)
 		}
 
 	case "\\cd":
@@ -2766,9 +2787,9 @@ func (m *Model) deleteSession(name string) {
 func (m *Model) listFavorites() {
 	count := 0
 
-	// Config file favorites
-	if m.deps.Config.Favorites != nil {
-		for name, fav := range m.deps.Config.Favorites {
+	// Persisted favorites
+	if m.persistedFavorites != nil {
+		for name, fav := range m.persistedFavorites {
 			preview := fav.SQL
 			if len(preview) > 60 {
 				preview = preview[:57] + "..."
@@ -2782,7 +2803,7 @@ func (m *Model) listFavorites() {
 		}
 	}
 
-	// Temp favorites (session-only)
+	// Temp favorites (session-only, saved when persist failed)
 	if m.tempFavorites != nil {
 		for name, fav := range m.tempFavorites {
 			preview := fav.SQL
@@ -2801,19 +2822,19 @@ func (m *Model) listFavorites() {
 	if count == 0 {
 		m.addOutput("No favorites saved. Use \\fav + <name> [desc] to save the last query.")
 	} else {
-		m.addOutput(fmt.Sprintf("%d favorite(s). \\fav <name> to run, \\fav show <name> to view.", count))
+		m.addOutput(fmt.Sprintf("%d favorite(s). \\fav <name> to view, \\fav run <name> to execute.", count))
 	}
 }
 
-// resolveFavorite finds a favorite by name (temp first, then config).
+// resolveFavorite finds a favorite by name (temp first, then persisted).
 func (m *Model) resolveFavorite(name string) (config.FavoriteConfig, bool) {
 	if m.tempFavorites != nil {
 		if fav, ok := m.tempFavorites[name]; ok {
 			return fav, true
 		}
 	}
-	if m.deps.Config.Favorites != nil {
-		if fav, ok := m.deps.Config.Favorites[name]; ok {
+	if m.persistedFavorites != nil {
+		if fav, ok := m.persistedFavorites[name]; ok {
 			return fav, true
 		}
 	}
@@ -2827,23 +2848,26 @@ func (m *Model) addFavorite(name, description string) {
 		return
 	}
 
+	now := time.Now().Unix()
 	fav := config.FavoriteConfig{
 		SQL:         m.lastQuery,
 		Description: description,
+		LastUsed:    now,
 	}
 
-	if m.deps.Config.Favorites == nil {
-		m.deps.Config.Favorites = make(map[string]config.FavoriteConfig)
+	if m.persistedFavorites == nil {
+		m.persistedFavorites = make(map[string]config.FavoriteConfig)
 	}
-	m.deps.Config.Favorites[name] = fav
+	m.persistedFavorites[name] = fav
 
-	if err := config.Save(m.deps.Config); err != nil {
+	if err := config.SaveFavorites(m.persistedFavorites); err != nil {
 		// Fallback to temp-only
 		if m.tempFavorites == nil {
 			m.tempFavorites = make(map[string]config.FavoriteConfig)
 		}
 		m.tempFavorites[name] = fav
-		m.addOutput(fmt.Sprintf("Save to config failed (%s), saved as temp favorite.", err))
+		delete(m.persistedFavorites, name)
+		m.addOutput(fmt.Sprintf("Save failed (%s), saved as temp favorite.", err))
 	}
 
 	desc := ""
@@ -2864,10 +2888,10 @@ func (m *Model) deleteFavorite(name string) {
 		}
 	}
 
-	if m.deps.Config.Favorites != nil {
-		if _, ok := m.deps.Config.Favorites[name]; ok {
-			delete(m.deps.Config.Favorites, name)
-			_ = config.Save(m.deps.Config)
+	if m.persistedFavorites != nil {
+		if _, ok := m.persistedFavorites[name]; ok {
+			delete(m.persistedFavorites, name)
+			_ = config.SaveFavorites(m.persistedFavorites)
 			deleted = true
 		}
 	}
@@ -2879,7 +2903,8 @@ func (m *Model) deleteFavorite(name string) {
 	}
 }
 
-// showFavorite displays the full SQL of a favorite.
+// showFavorite displays the favorite name and puts the SQL into the input buffer,
+// so the user can press Enter to execute or edit before running.
 func (m *Model) showFavorite(name string) {
 	fav, ok := m.resolveFavorite(name)
 	if !ok {
@@ -2891,7 +2916,7 @@ func (m *Model) showFavorite(name string) {
 		header += fmt.Sprintf("  \033[2m(%s)\033[0m", fav.Description)
 	}
 	m.addOutput(header)
-	m.addOutput(fav.SQL)
+	m.ed.SetText(fav.SQL)
 }
 
 // runFavorite executes a saved favorite query.
@@ -2900,6 +2925,17 @@ func (m Model) runFavorite(name string) (tea.Model, tea.Cmd) {
 	if !ok {
 		m.addOutput(fmt.Sprintf("Favorite '%s' not found. Use \\fav to list.", name))
 		return m, nil
+	}
+	// Update LastUsed timestamp for LRU
+	if m.persistedFavorites != nil {
+		if _, exists := m.persistedFavorites[name]; exists {
+			m.persistedFavorites[name] = config.FavoriteConfig{
+				SQL:         fav.SQL,
+				Description: fav.Description,
+				LastUsed:    time.Now().Unix(),
+			}
+			_ = config.SaveFavorites(m.persistedFavorites)
+		}
 	}
 	// Show which favorite is being run
 	m.addOutput(fmt.Sprintf("\033[2m→ fav %s: %s\033[0m", name, truncateStr(fav.SQL, 60)))
@@ -3737,7 +3773,7 @@ func (m *Model) handleDesc(parts []string) {
 }
 
 // handleCopy copies data to the system clipboard.
-func (m *Model) handleCopy(what string) {
+func (m *Model) handleCopy(what string, inputBuffer string) {
 	var content string
 
 	switch strings.ToLower(what) {
@@ -3768,10 +3804,14 @@ func (m *Model) handleCopy(what string) {
 		content = m.lastQuery + ";"
 
 	case "sql":
-		sql := strings.TrimSpace(m.ed.Text())
+		sql := strings.TrimSpace(inputBuffer)
 		if sql == "" {
-			m.addOutput("Input buffer is empty.")
-			return
+			// If input buffer is empty, fall back to last executed query
+			if m.lastQuery == "" {
+				m.addOutput("No SQL to copy (input buffer is empty and no query executed).")
+				return
+			}
+			sql = m.lastQuery + ";"
 		}
 		content = sql
 
@@ -3781,8 +3821,20 @@ func (m *Model) handleCopy(what string) {
 	}
 
 	if err := copyToClipboard(content); err != nil {
-		m.addOutput(fmt.Sprintf("Copy failed: %s", err))
-		m.addOutput("Tip: install xclip (Linux) or xsel for clipboard support.")
+		// No clipboard available — output to terminal instead
+		m.addOutput(content)
+		switch strings.ToLower(what) {
+		case "result":
+			lines := strings.Count(content, "\n")
+			if lines > 0 {
+				lines-- // trailing newline
+			}
+			m.addOutput(fmt.Sprintf("(%d rows — no clipboard, output above)", lines))
+		case "query":
+			m.addOutput("(No clipboard, query output above)")
+		case "sql":
+			m.addOutput("(No clipboard, SQL output above)")
+		}
 		return
 	}
 
@@ -3924,6 +3976,35 @@ func truncateStr(s string, maxLen int) string {
 	return string(runes[:maxLen])
 }
 
+// splitArgs splits a command string into arguments, respecting single and double quotes.
+// This allows arguments containing spaces, e.g.: \pipe grep '2025-03-27 09:31:21'
+func splitArgs(input string) []string {
+	var args []string
+	var current strings.Builder
+	inSingle := false
+	inDouble := false
+
+	for _, r := range input {
+		switch {
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case r == ' ' && !inSingle && !inDouble:
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args
+}
+
 // copyToClipboard copies text to the system clipboard using available tools.
 func copyToClipboard(text string) error {
 	// Try xclip first (most common on Linux)
@@ -3996,11 +4077,12 @@ Backslash commands:
   \encoding [name]  Show/set client character encoding
   \explain [analyze] <sql>  Run EXPLAIN on SQL (add analyze to execute)
   \export <f> [fmt] Export last result to file (csv/json/markdown)
-  \fav, \favorites   List favorite queries
-  \fav <name>        Execute a saved favorite
-  \fav + <n> [desc]  Save last query as favorite
+  \fav, \favorites   List favorite queries (saved in ~/.mysh_favorites.yaml, max 1000, LRU eviction)
+  \fav <name>        Show favorite SQL and put in input buffer (Enter to execute)
+  \fav + <name> [desc]  Save last query as favorite
   \fav - <name>      Delete a favorite
-  \fav show <name>   Show favorite SQL
+  \fav run <name>    Execute a saved favorite directly
+  \fav show <name>   Show favorite SQL (same as \fav <name>)
   \format [type]    Set/show output format (table|vertical|json|markdown|sql)
   \g [file]         Execute last query, optionally save to file
   \get <name>       Show session variable value

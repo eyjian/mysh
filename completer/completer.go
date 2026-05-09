@@ -340,8 +340,17 @@ func (c *Completer) columnSuggestions(table string) []Suggestion {
 			columns = append(columns, cols...)
 		}
 	}
-	suggestions := make([]Suggestion, len(columns))
-	for i, col := range columns {
+	// Deduplicate columns by name (keep first occurrence with type info)
+	seen := make(map[string]bool)
+	var uniqueCols []ColumnInfo
+	for _, col := range columns {
+		if !seen[col.Name] {
+			seen[col.Name] = true
+			uniqueCols = append(uniqueCols, col)
+		}
+	}
+	suggestions := make([]Suggestion, len(uniqueCols))
+	for i, col := range uniqueCols {
 		suggestions[i] = Suggestion{
 			Text:   col.Name,
 			Type:   SuggestColumn,

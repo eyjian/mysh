@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -91,8 +92,9 @@ type CompletionConfig struct {
 
 // FavoriteConfig holds a saved favorite SQL query.
 type FavoriteConfig struct {
-	SQL         string `mapstructure:"sql"`
-	Description string `mapstructure:"description"`
+	SQL         string `mapstructure:"sql" yaml:"sql"`
+	Description string `mapstructure:"description" yaml:"description"`
+	LastUsed    int64  `mapstructure:"last_used" yaml:"last_used"` // Unix timestamp, for LRU eviction
 }
 
 // SessionConfig holds a saved database session connection config.
@@ -368,6 +370,118 @@ func Save(cfg *Config) error {
 
 	if err := os.WriteFile(cfg.configPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
+}
+
+const (
+	favoritesFile     = ".mysh_favorites.yaml"
+	maxFavoriteEntries = 1000
+)
+
+// FavoritesPath returns the path to the favorites file.
+func FavoritesPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, favoritesFile)
+}
+
+// LoadFavorites loads favorites from the standalone YAML file.
+// If the standalone file does not exist but favorites exist in the main config,
+// they are migrated to the standalone file automatically.
+// Returns nil map if no favorites exist (not an error).
+func LoadFavorites() (map[string]FavoriteConfig, error) {
+	path := FavoritesPath()
+	if path == "" {
+		return nil, fmt.Errorf("cannot determine home directory")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]FavoriteConfig), nil
+		}
+		return nil, fmt.Errorf("failed to read favorites file: %w", err)
+	}
+
+	var favs map[string]FavoriteConfig
+	if err := yaml.Unmarshal(data, &favs); err != nil {
+		return nil, fmt.Errorf("failed to parse favorites file: %w", err)
+	}
+
+	if favs == nil {
+		favs = make(map[string]FavoriteConfig)
+	}
+	return favs, nil
+}
+
+// MigrateFavoritesFromConfig moves favorites from the main config file to
+// the standalone favorites file. This is called during startup if the
+// standalone file does not exist yet but the config has favorites.
+func MigrateFavoritesFromConfig(cfg *Config) error {
+	if cfg.Favorites == nil || len(cfg.Favorites) == 0 {
+		return nil
+	}
+
+	// Check if standalone file already exists
+	path := FavoritesPath()
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil // standalone file exists, skip migration
+	}
+
+	// Migrate
+	if err := SaveFavorites(cfg.Favorites); err != nil {
+		return err
+	}
+
+	// Clear favorites from main config to avoid saving them again
+	cfg.Favorites = nil
+	_ = Save(cfg)
+	return nil
+}
+
+// SaveFavorites writes favorites to the standalone YAML file.
+// If the count exceeds maxFavoriteEntries, the least-recently-used entries are evicted.
+func SaveFavorites(favs map[string]FavoriteConfig) error {
+	path := FavoritesPath()
+	if path == "" {
+		return fmt.Errorf("cannot determine home directory")
+	}
+
+	// Evict LRU entries if over the limit
+	if len(favs) > maxFavoriteEntries {
+		type kv struct {
+			key      string
+			lastUsed int64
+		}
+		entries := make([]kv, 0, len(favs))
+		for k, v := range favs {
+			entries = append(entries, kv{k, v.LastUsed})
+		}
+		// Sort by LastUsed ascending (oldest first)
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].lastUsed < entries[j].lastUsed
+		})
+		// Remove oldest entries
+		toRemove := len(favs) - maxFavoriteEntries
+		for i := 0; i < toRemove; i++ {
+			delete(favs, entries[i].key)
+		}
+	}
+
+	data, err := yaml.Marshal(favs)
+	if err != nil {
+		return fmt.Errorf("failed to marshal favorites: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("failed to write favorites file: %w", err)
 	}
 
 	return nil

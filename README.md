@@ -131,6 +131,127 @@ mysh> SELECT id, name
     -> WHERE age > 18;
 ```
 
+### Usage Examples
+
+#### Query & Inspect
+
+```sql
+-- List databases and tables
+mysh> \l
+mysh> \dt
+mysh> \dt user*                      -- filter tables by pattern
+
+-- Describe table structure
+mysh> \desc users                    -- column overview
+mysh> \desc users full               -- full details (engine, charset, etc.)
+mysh> \desc users indexes            -- show indexes
+mysh> \desc users create             -- show CREATE TABLE statement
+
+-- Query with different output formats
+mysh> SELECT * FROM users LIMIT 5;   -- table (default)
+mysh> SELECT * FROM users LIMIT 5\G  -- vertical (one column per line)
+mysh> SELECT * FROM users LIMIT 5\j  -- JSON array
+mysh> SELECT * FROM users LIMIT 5\m  -- Markdown table
+```
+
+#### Session Variables (psql-compatible)
+
+```sql
+-- Set variables and use them in SQL with :varname substitution
+mysh> \set dbname testdb
+mysh> \set limit 10
+mysh> SELECT * FROM :'dbname' LIMIT :limit;
+-- Executes: SELECT * FROM 'testdb' LIMIT 10
+
+-- View all variables
+mysh> \set
+  Special variables:
+   AUTOCOMMIT = on
+   ON_ERROR_STOP = off
+   ECHO = off
+
+-- Control behavior with special variables
+mysh> \set AUTOCOMMIT off            -- auto-BEGIN before each statement
+mysh> \set ON_ERROR_STOP on          -- stop on first error
+mysh> \set ECHO queries              -- show SQL after variable substitution
+
+-- Use \echo with variable substitution
+mysh> \set name Alice
+mysh> \echo Hello :name!
+Hello Alice!
+
+-- Interactive prompt for variable input
+mysh> \prompt name Enter your name:
+-- (user types value, stored in :name)
+```
+
+#### Export & Pipe
+
+```sql
+-- Export query results
+mysh> SELECT * FROM users;
+mysh> \export ~/users.csv            -- auto-infer format from extension
+mysh> \export ~/users.json json
+mysh> \export ~/report.md markdown
+
+-- Pipe results to system commands
+mysh> SELECT * FROM users;
+mysh> \pipe grep admin              -- filter results through grep
+mysh> \pipe grep '2025-03-27 09'    -- use quotes for patterns with spaces
+mysh> \pipe wc -l                   -- count result rows
+mysh> \pipe sort -k2                -- sort by second column
+
+-- Copy content (outputs to terminal if no clipboard tool)
+mysh> \copy result                   -- copy last result as TSV
+mysh> \copy query                    -- copy last executed SQL
+mysh> \copy sql                      -- copy current input or last SQL
+```
+
+#### Monitoring & Automation
+
+```sql
+-- Live watch a query
+mysh> \watch 2 SELECT COUNT(*) FROM processes;
+mysh> \watch 5                       -- re-run last query every 5s
+
+-- Execute SQL from file
+mysh> \source /path/to/init.sql
+
+-- Execute system commands without leaving mysh
+mysh> \sys date
+mysh> \! ls -la ~/backups/
+```
+
+#### Favorite Queries
+
+```sql
+-- Save the last executed query as a favorite
+-- Syntax: \fav + <name> [description]
+--   name        — a unique name to identify this favorite
+--   description — optional text to describe what the query does
+mysh> SELECT * FROM users WHERE status = 'active' ORDER BY created_at DESC LIMIT 10;
+mysh> \fav + active_users Top 10 active users
+mysh> \fav + daily_stats                  -- description is optional
+
+-- List all favorites
+mysh> \fav
+  active_users  | Top 10 active users
+
+-- View the SQL of a favorite (puts SQL in input buffer, press Enter to execute)
+mysh> \fav active_users
+  Favorite: active_users  (Top 10 active users)
+● mysh> SELECT * FROM users WHERE status = 'active' ORDER BY created_at DESC LIMIT 10
+
+-- Execute a saved favorite
+mysh> \fav run active_users
+→ fav active_users: SELECT * FROM users WHERE status = 'active' ...
+
+-- Delete a favorite
+mysh> \fav - active_users
+
+-- Favorites persist across sessions in ~/.mysh_favorites.yaml (max 1000, LRU eviction)
+```
+
 ### Transaction Support
 
 mysh supports explicit transactions with dedicated connection binding:
@@ -348,23 +469,24 @@ Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syn
 | `\clear`, `\c` | Clear screen output |
 | `\connect <dsn>` | Connect to a database (user@host:port/db or just db) |
 | `\conninfo` | Show detailed connection info (host, port, user, driver) |
-| `\copy <what>` | Copy to clipboard (result, query, sql) |
+| `\copy <what>` | Copy to clipboard or output to terminal (result, query, sql) |
 | `\desc <t> [mode]` | Describe table (no arg = list tables; columns, full, indexes, create) |
 | `\di [table]`, `\indexes` | List indexes (optional table filter) |
 | `\dn`, `\schemas` | List schemas (MySQL: databases, PostgreSQL: schemas) |
 | `\dt [pattern]`, `\tables` | List tables (optional pattern: user* or user%) |
 | `\du`, `\users` | List database users |
 | `\dv [pattern]`, `\views` | List views (optional pattern) |
-| `\echo <text>` | Echo text to output |
+| `\echo <text>` | Echo text to output (`:var` substitution supported) |
 | `\edit`, `\e` | Open external editor to edit/execute SQL |
 | `\encoding [name]` | Show/set client character encoding |
 | `\explain [analyze] <sql>` | Run EXPLAIN on SQL (add analyze to execute) |
 | `\export <file> [fmt]` | Export last query result to file (csv, json, markdown) |
-| `\fav`, `\favorites` | List favorite queries |
-| `\fav <name>` | Execute a saved favorite |
-| `\fav + <name> [desc]` | Save last query as favorite |
+| `\fav`, `\favorites` | List favorite queries (saved in ~/.mysh_favorites.yaml, max 1000, LRU eviction) |
+| `\fav <name>` | Show favorite SQL and put in input buffer (Enter to execute) |
+| `\fav + <name> [desc]` | Save last query as favorite (name: favorite name, desc: optional description) |
 | `\fav - <name>` | Delete a favorite |
-| `\fav show <name>` | Show favorite SQL |
+| `\fav run <name>` | Execute a saved favorite |
+| `\fav show <name>` | Show favorite SQL (same as \fav \<name\>) |
 | `\format [type]` | Set/show output format (table, vertical, json, markdown) |
 | `\g [file]` | Execute last query, optionally save to file |
 | `\get <name>` | Show session variable value |
@@ -387,7 +509,7 @@ Theme values use [lipgloss](https://github.com/charmbracelet/lipgloss) style syn
 | `\session save <name>` | Save current connection as session |
 | `\session del <name>` | Delete a saved session |
 | `\sf <func>` | Show function definition |
-| `\set [name value]` | Show/set session variables |
+| `\set [name value]` | Show/set session variables. Special: `AUTOCOMMIT`, `ON_ERROR_STOP`, `ECHO`. Use `:varname` in SQL for substitution |
 | `\slow [seconds]` | Set/show slow query warning threshold (0 = disabled) |
 | `\source <file>` | Execute SQL from file |
 | `\status`, `\s` | Show connection status |

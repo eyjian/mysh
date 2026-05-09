@@ -31,7 +31,11 @@ func (a *CacheAdapter) Tables(db string) []string {
 }
 
 // Columns returns column info for a table in a specific database.
+// If db is empty, uses the current schema (MySQL: current database, PostgreSQL: "public").
 func (a *CacheAdapter) Columns(db, table string) []completer.ColumnInfo {
+	if db == "" && a.cache.pool != nil {
+		db = a.cache.pool.CurrentSchema()
+	}
 	cols := a.cache.ColumnsInfo(db, table)
 	result := make([]completer.ColumnInfo, len(cols))
 	for i, col := range cols {
