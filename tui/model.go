@@ -1951,11 +1951,25 @@ func (m Model) handleEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Parse format suffix (\G, \j, \m) so that e.g. `SELECT ... \G`
+	// edited via \edit is treated the same as if typed directly.
+	sql, formatOverride := parseFormatSuffix(sql)
+	sql = strings.TrimSpace(sql)
+	if sql == "" {
+		m.addOutput("Empty content, nothing to execute.")
+		m.ed.Clear()
+		return m, nil
+	}
+
 	// Clear the input line and execute the edited SQL
 	m.ed.Clear()
 	m.multiline = false
-	m.addOutput(m.prompt + m.highlightDisplayEntry(sql))
-	return m.executeInput(sql, output.FormatTable)
+	displayEntry := sql
+	if suffix := formatSuffixString(formatOverride); suffix != "" {
+		displayEntry = sql + suffix
+	}
+	m.addOutput(m.prompt + m.highlightDisplayEntry(displayEntry))
+	return m.executeInput(sql, formatOverride)
 }
 
 // handlePipe pipes the last query result to a system command.
