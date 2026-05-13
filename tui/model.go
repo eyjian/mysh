@@ -10,6 +10,10 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
+
 	"github.com/eyjian/mysh/completer"
 	"github.com/eyjian/mysh/config"
 	"github.com/eyjian/mysh/connection"
@@ -20,23 +24,20 @@ import (
 	"github.com/eyjian/mysh/metadata"
 	"github.com/eyjian/mysh/output"
 	sshpkg "github.com/eyjian/mysh/ssh"
-
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Dependencies holds all the shared service instances for the TUI.
 type Dependencies struct {
-	Config              *config.Config
-	Pool                *connection.Pool
-	Executor            *executor.Executor
-	Meta                *metadata.Cache
-	History             *history.History
-	Formatter           *output.Formatter
-	Highlighter         *highlight.Highlighter
-	Completer           *completer.Completer
-	AutoVerticalOutput  bool
-	SSHTunnel           *sshpkg.Tunnel // nil if no SSH tunnel
+	Config             *config.Config
+	Pool               *connection.Pool
+	Executor           *executor.Executor
+	Meta               *metadata.Cache
+	History            *history.History
+	Formatter          *output.Formatter
+	Highlighter        *highlight.Highlighter
+	Completer          *completer.Completer
+	AutoVerticalOutput bool
+	SSHTunnel          *sshpkg.Tunnel // nil if no SSH tunnel
 }
 
 // TunnelCloser is an interface for closing an SSH tunnel.
@@ -47,29 +48,29 @@ type TunnelCloser interface {
 
 // Model is the top-level bubbletea model for the mysh TUI.
 type Model struct {
-	deps   Dependencies
-	ed     *editor.Editor
-	prompt string
+	deps     Dependencies
+	ed       *editor.Editor
+	prompt   string
 	mlPrompt string
 
 	// UI state
-	width       int
-	height      int
-	output      []string   // accumulated output lines (internal tracking)
+	width             int
+	height            int
+	output            []string // accumulated output lines (internal tracking)
 	pendingPrintLines []string // lines waiting to be printed via tea.Println
-	err         error      // last error
-	quitting    bool
-	executing   bool       // true while a query is running
-	multiline   bool       // true when in multi-line input mode
+	err               error    // last error
+	quitting          bool
+	executing         bool // true while a query is running
+	multiline         bool // true when in multi-line input mode
 
 	// Completion state
-	showComp    bool
-	compItems   []completer.Suggestion
-	compIndex   int
+	showComp  bool
+	compItems []completer.Suggestion
+	compIndex int
 
 	// Cursor blink state
-	cursorOn    bool
-	cursorTick  bool // true when cursor blink tick is active
+	cursorOn   bool
+	cursorTick bool // true when cursor blink tick is active
 
 	// Multi-line accumulation
 	multilineParts []string // collected lines during multi-line input
@@ -84,14 +85,14 @@ type Model struct {
 	connected bool // true = last health check was successful
 
 	// History search state (Ctrl+R)
-	historySearch    bool     // true when in incremental history search mode
-	searchQuery      string   // current search query
-	searchResults    []string // filtered history entries matching query
-	searchResultIdx  int      // current index in searchResults
+	historySearch   bool     // true when in incremental history search mode
+	searchQuery     string   // current search query
+	searchResults   []string // filtered history entries matching query
+	searchResultIdx int      // current index in searchResults
 
 	// Async execution state
-	execStart     time.Time // when the current query started executing
-	spinnerFrame  int       // current frame index of the spinner animation
+	execStart    time.Time // when the current query started executing
+	spinnerFrame int       // current frame index of the spinner animation
 
 	// Last query result (for \export and \watch)
 	lastResult *executor.QueryResult
@@ -131,9 +132,9 @@ type Model struct {
 	sessionVars map[string]string
 
 	// Special session variables (controlled via \set)
-	autoCommit   bool       // AUTOCOMMIT: auto-commit each statement (default: on)
-	onErrorStop  bool       // ON_ERROR_STOP: stop script on error (default: off)
-	echoMode     echoModeT  // ECHO: echo SQL before execution
+	autoCommit  bool      // AUTOCOMMIT: auto-commit each statement (default: on)
+	onErrorStop bool      // ON_ERROR_STOP: stop script on error (default: off)
+	echoMode    echoModeT // ECHO: echo SQL before execution
 
 	// Result title (for \T)
 	resultTitle string
@@ -148,10 +149,10 @@ type Model struct {
 	showWarnings bool
 
 	// Styles
-	promptStyle lipgloss.Style
-	outputStyle lipgloss.Style
-	errorStyle  lipgloss.Style
-	compStyle   lipgloss.Style
+	promptStyle  lipgloss.Style
+	outputStyle  lipgloss.Style
+	errorStyle   lipgloss.Style
+	compStyle    lipgloss.Style
 	compSelStyle lipgloss.Style
 }
 
@@ -162,30 +163,30 @@ func NewModel(deps Dependencies) Model {
 	mlPrompt := cfg.UI.MultilinePrompt
 
 	m := Model{
-		deps:         deps,
-		ed:           editor.New(),
-		prompt:       prompt,
-		mlPrompt:     mlPrompt,
-		output:       []string{},
-		cursorOn:     true,
-		mouseEnabled:        false,
-		autoVerticalOutput:  deps.AutoVerticalOutput,
-		connected:           true,
-		safeUpdates:         deps.Config.Safety.SafeUpdates,
-		showTiming:          true,
-		showHeader:          true,
-		sessionVars:         make(map[string]string),
-		autoCommit:          true,
-		onErrorStop:         false,
-		echoMode:            echoOff,
+		deps:               deps,
+		ed:                 editor.New(),
+		prompt:             prompt,
+		mlPrompt:           mlPrompt,
+		output:             []string{},
+		cursorOn:           true,
+		mouseEnabled:       false,
+		autoVerticalOutput: deps.AutoVerticalOutput,
+		connected:          true,
+		safeUpdates:        deps.Config.Safety.SafeUpdates,
+		showTiming:         true,
+		showHeader:         true,
+		sessionVars:        make(map[string]string),
+		autoCommit:         true,
+		onErrorStop:        false,
+		echoMode:           echoOff,
 		verboseMode:        false,
 		showWarnings:       true,
-		workDir:             "", // will be set on first prompt
-		promptStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
-		outputStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
-		errorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
-		compStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("246")),
-		compSelStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62")).Bold(true),
+		workDir:            "", // will be set on first prompt
+		promptStyle:        lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
+		outputStyle:        lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
+		errorStyle:         lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true),
+		compStyle:          lipgloss.NewStyle().Foreground(lipgloss.Color("246")),
+		compSelStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62")).Bold(true),
 	}
 	_ = cfg.Theme // theme is used via Highlighter
 
@@ -252,6 +253,15 @@ type execMultiResultMsg struct {
 	stopped   bool // true if execution was stopped by ON_ERROR_STOP
 }
 
+// editFinishedMsg is sent when the external editor (\edit) has exited.
+// The bubbletea runtime takes care of releasing/restoring the terminal
+// around the editor process, so we just need to read back the temp file
+// and execute the SQL here.
+type editFinishedMsg struct {
+	tmpPath string
+	err     error
+}
+
 // execTickMsg is sent periodically during query execution to update the timer/spinner.
 type execTickMsg time.Time
 
@@ -305,6 +315,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.execStart = time.Time{}
 		m.spinnerFrame = 0
 		cmd = m.displayQueryResult(msg.result, msg.err, msg.formatOverride)
+
+	case editFinishedMsg:
+		var newM tea.Model
+		newM, cmd = m.handleEditFinished(msg)
+		m = newM.(Model)
 
 	case execMultiResultMsg:
 		m.executing = false
@@ -1889,55 +1904,20 @@ func (m *Model) exitPagination(showAll bool) {
 	m.pagedTotal = 0
 }
 
-// handleEdit opens the user's editor ($EDITOR or vi) with the current input buffer
-// or the last executed query. After the editor closes, the content is executed as SQL.
-func (m Model) handleEdit() (tea.Model, tea.Cmd) {
-	// Determine initial content: current input, or last query
-	content := m.ed.Text()
-	if strings.TrimSpace(content) == "" && m.lastQuery != "" {
-		content = m.lastQuery
+// handleEditFinished is invoked after the external editor has exited.
+// It reads back the edited content from the temp file (path captured in msg),
+// removes the temp file, and dispatches the SQL for execution.
+func (m Model) handleEditFinished(msg editFinishedMsg) (tea.Model, tea.Cmd) {
+	tmpPath := msg.tmpPath
+	if tmpPath != "" {
+		defer os.Remove(tmpPath)
 	}
 
-	// Write content to a temp file
-	tmpFile, err := os.CreateTemp("", "mysh-edit-*.sql")
-	if err != nil {
-		m.addOutput(fmt.Sprintf("ERROR: Failed to create temp file: %s", err))
-		return m, nil
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmpFile.WriteString(content); err != nil {
-		tmpFile.Close()
-		m.addOutput(fmt.Sprintf("ERROR: Failed to write temp file: %s", err))
-		return m, nil
-	}
-	tmpFile.Close()
-
-	// Determine editor
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = os.Getenv("VISUAL")
-	}
-	if editor == "" {
-		editor = "vi"
-	}
-
-	// Suspend the TUI, run the editor, then resume
-	tea.ExitAltScreen()
-	defer tea.EnterAltScreen()
-
-	cmd := exec.Command(editor, tmpPath)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		m.addOutput(fmt.Sprintf("ERROR: Editor failed: %s", err))
+	if msg.err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: Editor failed: %s", msg.err))
 		return m, nil
 	}
 
-	// Read back the edited content
 	edited, err := os.ReadFile(tmpPath)
 	if err != nil {
 		m.addOutput(fmt.Sprintf("ERROR: Failed to read temp file: %s", err))
@@ -1970,6 +1950,51 @@ func (m Model) handleEdit() (tea.Model, tea.Cmd) {
 	}
 	m.addOutput(m.prompt + m.highlightDisplayEntry(displayEntry))
 	return m.executeInput(sql, formatOverride)
+}
+
+// handleEdit opens the user's editor ($EDITOR or vi) with the current input buffer
+// or the last executed query. After the editor closes, the content is executed as SQL.
+func (m Model) handleEdit() (tea.Model, tea.Cmd) {
+	// Determine initial content: current input, or last query
+	content := m.ed.Text()
+	if strings.TrimSpace(content) == "" && m.lastQuery != "" {
+		content = m.lastQuery
+	}
+
+	// Write content to a temp file
+	tmpFile, err := os.CreateTemp("", "mysh-edit-*.sql")
+	if err != nil {
+		m.addOutput(fmt.Sprintf("ERROR: Failed to create temp file: %s", err))
+		return m, nil
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.WriteString(content); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		m.addOutput(fmt.Sprintf("ERROR: Failed to write temp file: %s", err))
+		return m, nil
+	}
+	tmpFile.Close()
+
+	// Determine editor
+	editorBin := os.Getenv("EDITOR")
+	if editorBin == "" {
+		editorBin = os.Getenv("VISUAL")
+	}
+	if editorBin == "" {
+		editorBin = "vi"
+	}
+
+	// Use tea.ExecProcess so that bubbletea properly releases the terminal
+	// (restores cooked mode, stops its own input reader) before launching
+	// the editor, and re-captures the terminal afterwards. Without this,
+	// keystrokes typed into vi (e.g. the leading 's' of 'select' when
+	// pasting) can be swallowed by bubbletea's still-running input loop.
+	cmd := exec.Command(editorBin, tmpPath)
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return editFinishedMsg{tmpPath: tmpPath, err: err}
+	})
 }
 
 // handlePipe pipes the last query result to a system command.
@@ -2354,6 +2379,15 @@ func (m Model) View() string {
 		// Cursor: overlay on character at cursor position using reverse video
 		cursorStyle := lipgloss.NewStyle().Reverse(true)
 
+		// Determine available width for soft-wrapping the input.
+		// The first visual row of each logical line shares space with the prompt;
+		// continuation rows are indented to match the prompt's display width.
+		firstPromptW := lipgloss.Width(currentPrompt)
+		mlPromptW := lipgloss.Width(m.mlPrompt)
+		// Indent continuation rows so they line up under the input area
+		// (i.e., right after the visible prompt). Use spaces of equal width.
+		contIndent := strings.Repeat(" ", firstPromptW)
+
 		if input == "" {
 			if m.cursorOn {
 				sb.WriteString(cursorStyle.Render(" "))
@@ -2362,51 +2396,108 @@ func (m Model) View() string {
 			}
 		} else {
 			for i, line := range lines {
+				// Pick the prompt width that this logical line starts with
+				lineStartW := firstPromptW
 				if i > 0 {
 					sb.WriteString("\n")
 					sb.WriteString(m.promptStyle.Render(m.mlPrompt))
+					lineStartW = mlPromptW
 				}
 
 				lineRunes := []rune(line)
 
-				if i == cursorLine {
-					// This line contains the cursor
-					if m.cursorOn && cursorCol < len(lineRunes) {
-						// Cursor overlays a character on this line
-						beforeText := string(lineRunes[:cursorCol])
-						cursorChar := string(lineRunes[cursorCol])
-						afterText := string(lineRunes[cursorCol+1:])
-						if m.deps.Highlighter != nil {
-							sb.WriteString(m.deps.Highlighter.Highlight(beforeText))
-							sb.WriteString(cursorStyle.Render(cursorChar))
-							sb.WriteString(m.deps.Highlighter.Highlight(afterText))
-						} else {
-							sb.WriteString(beforeText)
-							sb.WriteString(cursorStyle.Render(cursorChar))
-							sb.WriteString(afterText)
+				// Compute soft-wrap segments for this logical line.
+				// segs[k] = (startRuneIdx, endRuneIdx) of segment k.
+				// The first segment uses (m.width - lineStartW) columns,
+				// subsequent segments use (m.width - firstPromptW) columns.
+				type seg struct{ start, end int }
+				var segs []seg
+				if m.width <= 0 {
+					// Width unknown: fall back to a single segment (no wrapping).
+					segs = []seg{{0, len(lineRunes)}}
+				} else {
+					firstAvail := m.width - lineStartW
+					contAvail := m.width - firstPromptW
+					if firstAvail < 1 {
+						firstAvail = 1
+					}
+					if contAvail < 1 {
+						contAvail = 1
+					}
+					avail := firstAvail
+					segStart := 0
+					curW := 0
+					for r := 0; r < len(lineRunes); r++ {
+						w := runewidth.RuneWidth(lineRunes[r])
+						if w == 0 {
+							w = 1
 						}
-					} else if m.cursorOn && cursorCol == len(lineRunes) {
-						// Cursor at end of this line — block cursor on empty space
-						if m.deps.Highlighter != nil {
-							sb.WriteString(m.deps.Highlighter.Highlight(line))
-						} else {
-							sb.WriteString(line)
+						if curW+w > avail {
+							segs = append(segs, seg{segStart, r})
+							segStart = r
+							curW = 0
+							avail = contAvail
 						}
-						sb.WriteString(cursorStyle.Render(" "))
-					} else if !m.cursorOn {
-						// Cursor hidden (blink off) on this line
-						if m.deps.Highlighter != nil {
-							sb.WriteString(m.deps.Highlighter.Highlight(line))
-						} else {
-							sb.WriteString(line)
+						curW += w
+					}
+					segs = append(segs, seg{segStart, len(lineRunes)})
+				}
+
+				for sIdx, s := range segs {
+					if sIdx > 0 {
+						// Continuation visual row of this same logical line.
+						sb.WriteString("\n")
+						sb.WriteString(contIndent)
+					}
+					segText := string(lineRunes[s.start:s.end])
+
+					// Decide whether the cursor falls in this segment.
+					cursorInSeg := false
+					localCol := 0
+					atSegEnd := false
+					if i == cursorLine && m.cursorOn {
+						// Cursor at end of last segment of last logical line
+						isLastSeg := sIdx == len(segs)-1
+						if cursorCol >= s.start && cursorCol < s.end {
+							cursorInSeg = true
+							localCol = cursorCol - s.start
+						} else if cursorCol == s.end && isLastSeg {
+							cursorInSeg = true
+							localCol = cursorCol - s.start
+							atSegEnd = true
 						}
 					}
-				} else {
-					// Non-cursor line — just highlight
-					if m.deps.Highlighter != nil {
-						sb.WriteString(m.deps.Highlighter.Highlight(line))
+
+					if cursorInSeg {
+						segRunes := []rune(segText)
+						if atSegEnd {
+							// Block cursor after the last character
+							if m.deps.Highlighter != nil {
+								sb.WriteString(m.deps.Highlighter.Highlight(segText))
+							} else {
+								sb.WriteString(segText)
+							}
+							sb.WriteString(cursorStyle.Render(" "))
+						} else {
+							before := string(segRunes[:localCol])
+							ch := string(segRunes[localCol])
+							after := string(segRunes[localCol+1:])
+							if m.deps.Highlighter != nil {
+								sb.WriteString(m.deps.Highlighter.Highlight(before))
+								sb.WriteString(cursorStyle.Render(ch))
+								sb.WriteString(m.deps.Highlighter.Highlight(after))
+							} else {
+								sb.WriteString(before)
+								sb.WriteString(cursorStyle.Render(ch))
+								sb.WriteString(after)
+							}
+						}
 					} else {
-						sb.WriteString(line)
+						if m.deps.Highlighter != nil {
+							sb.WriteString(m.deps.Highlighter.Highlight(segText))
+						} else {
+							sb.WriteString(segText)
+						}
 					}
 				}
 			}
@@ -3238,9 +3329,11 @@ func (m *Model) handleListViews(pattern string) {
 
 // handleSet sets a session variable.
 // Supports special variables that control mysh behavior:
-//   AUTOCOMMIT   - on/off: auto-commit each statement (default: on)
-//   ON_ERROR_STOP - on/off: stop execution on error (default: off)
-//   ECHO         - all/queries/off: echo SQL before execution
+//
+//	AUTOCOMMIT   - on/off: auto-commit each statement (default: on)
+//	ON_ERROR_STOP - on/off: stop execution on error (default: off)
+//	ECHO         - all/queries/off: echo SQL before execution
+//
 // Also supports :varname substitution in SQL (psql-compatible).
 func (m *Model) handleSet(parts []string) {
 	if len(parts) == 0 {
@@ -3466,8 +3559,8 @@ type echoModeT int
 
 const (
 	echoOff     echoModeT = iota // ECHO off (default)
-	echoAll                       // ECHO all — echo commands and queries
-	echoQueries                   // ECHO queries — echo only query text
+	echoAll                      // ECHO all — echo commands and queries
+	echoQueries                  // ECHO queries — echo only query text
 )
 
 // parseBoolValue parses a string as a boolean, returning the default value
