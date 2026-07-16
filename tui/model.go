@@ -622,11 +622,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		insertText := b.String()
 
 		// Multi-line paste: process each line through the multiline
-		// accumulation mechanism (like MySQL CLI). This ensures each
+		// accumulation mechanism (like MySQL cli). This ensures each
 		// line is displayed in the output area with the appropriate
 		// prompt, and the last line remains in the editor for editing.
 		lines := strings.Split(insertText, "\n")
 		if len(lines) > 1 {
+			// Trim trailing empty lines from pasted text.
+			// When users copy SQL that ends with a trailing newline
+			// (e.g., from an editor), Split produces a final empty
+			// string element. Leaving this empty string in the editor
+			// prevents the SQL from being auto-executed even though
+			// the statement is already complete (ends with ;).
+			for len(lines) > 1 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+				lines = lines[:len(lines)-1]
+			}
+
 			// First line uses the primary prompt
 			firstLine := lines[0]
 			m.addOutput(m.prompt + m.highlightDisplayEntry(firstLine))
@@ -642,6 +652,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Last line stays in the editor for editing
 			lastLine := lines[len(lines)-1]
 			m.ed.SetText(lastLine)
+
+			// Auto-execute: if the last line ends with ';' (SQL is
+			// complete), execute immediately instead of leaving it
+			// in the editor. This is especially important when the
+			// pasted text had a trailing newline — the user already
+			// considers the SQL finished and expects results.
+			lastTrimmed := strings.TrimSpace(lastLine)
+			if strings.HasSuffix(lastTrimmed, ";") {
+				// Combine all parts and execute
+				fullInput := strings.Join(append(m.multilineParts, lastLine), "\n")
+				m.multilineParts = nil
+				m.multiline = false
+				m.ed.Clear()
+				return m.executeInput(fullInput, output.FormatTable)
+			}
 		} else {
 			// Single-line paste: just insert into editor
 			m.ed.Insert(insertText)
@@ -884,9 +909,9 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	}
 
 	input := m.ed.Text()
-	// Normalize embedded newlines: multi-line pasted text may contain \n
-	// characters; replace them with spaces for SQL execution (like MySQL CLI).
-	input = strings.ReplaceAll(input, "\n", " ")
+	// Preserve newlines in pasted text to maintain SQL comment semantics.
+	// Single-line comments (--) extend to end of line, so \n must be preserved
+	// to prevent comments from consuming subsequent SQL text.
 
 	// Empty input + disconnected: auto-reconnect (like MySQL CLI)
 	if strings.TrimSpace(input) == "" && !m.connected {
@@ -984,9 +1009,11 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	}
 
 	// Execute the SQL — combine all multi-line parts with the final line
+	// Use newline as separator to preserve SQL comment semantics
+	// (e.g., "-- comment" only comments to end of line, which requires \n)
 	m.multiline = false
 	m.showComp = false
-	fullInput := strings.Join(append(m.multilineParts, trimmed), " ")
+	fullInput := strings.Join(append(m.multilineParts, trimmed), "\n")
 	m.multilineParts = nil
 	return m.executeInput(fullInput, formatOverride)
 }
