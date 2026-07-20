@@ -305,3 +305,161 @@ func CompactSQL(sql string) string {
 func isAlpha(r rune) bool {
 	return unicode.IsLetter(r)
 }
+
+// FormatCreateTableSQL reformats the PARTITION clause in a CREATE TABLE
+// statement so that each PARTITION definition appears on its own line.
+// MySQL's SHOW CREATE TABLE returns all partition definitions on a single
+// line, which is hard to read; this function inserts line breaks and
+// indentation to make the output more legible.
+func FormatCreateTableSQL(sql string) string {
+	// Find "PARTITION BY" (case-insensitive)
+	upper := strings.ToUpper(sql)
+	idx := strings.Index(upper, "PARTITION BY")
+	if idx == -1 {
+		return sql
+	}
+
+	// Find the opening '(' after PARTITION BY ... that encloses the
+	// partition list. We need to skip the function-call parens in
+	// expressions like "PARTITION BY RANGE ( month(pay_time) ) ("
+	parenStart := strings.IndexByte(sql[idx:], '(')
+	if parenStart == -1 {
+		return sql
+	}
+	parenStart += idx
+
+	// Walk forward to find the matching '(' that starts the partition
+	// list. The partition list opening paren is the one that appears
+	// *after* the RANGE/ LIST/ KEY/ HASH expression closing paren.
+	// Strategy: track depth; when depth returns to 0 after seeing at
+	// least one nested paren, the *next* '(' at depth 0 is our target.
+	depth := 0
+	listOpen := -1
+	for i := parenStart; i < len(sql); i++ {
+		switch sql[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				// This closing paren ends the RANGE expression.
+				// The next '(' starts the partition list.
+				for j := i + 1; j < len(sql); j++ {
+					if sql[j] == '(' {
+						listOpen = j
+						break
+					}
+					if !isSpace(rune(sql[j])) {
+						// Unexpected character; give up
+						return sql
+					}
+				}
+				break
+			}
+		}
+		if listOpen != -1 {
+			break
+		}
+	}
+	if listOpen == -1 {
+		// Could not find partition list opening paren;
+		// maybe the paren we found IS the list (e.g., KEY/HASH).
+		// Heuristic: if the content after '(' contains "PARTITION ",
+		// treat it as the list.
+		listOpen = parenStart
+	}
+
+	// Find the matching closing paren
+	depth = 0
+	listClose := -1
+	for i := listOpen; i < len(sql); i++ {
+		switch sql[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				listClose = i
+				break
+			}
+		}
+	}
+	if listClose == -1 {
+		return sql
+	}
+
+	// Extract the partition definitions between the parens
+	inner := sql[listOpen+1 : listClose]
+
+	// Split on "PARTITION " boundaries (case-insensitive).
+	// Each chunk starts with "PARTITION " or is the leading whitespace.
+	parts := splitPartitionDefs(inner)
+
+	if len(parts) <= 1 {
+		return sql
+	}
+
+	// Rebuild with newlines and indentation
+	var sb strings.Builder
+	// Insert a newline before PARTITION BY so it starts on its own line.
+	// Trim trailing spaces from the part before PARTITION BY so that
+	// PARTITION BY begins at the start of the line (flush-left).
+	beforePartition := strings.TrimRight(sql[:idx], " \t")
+	sb.WriteString(beforePartition)
+	sb.WriteString("\n")
+	sb.WriteString(sql[idx:listOpen+1]) // PARTITION BY ... (
+	for i, part := range parts {
+		if i == 0 {
+			// First part may be empty/whitespace before the first PARTITION
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				// Skip the empty leading whitespace; no blank line
+				continue
+			}
+		}
+		sb.WriteString("\n  ")
+		sb.WriteString(strings.TrimSpace(part))
+	}
+	sb.WriteString("\n")            // newline before closing ')'
+	sb.WriteString(sql[listClose:]) // closing ')' and everything after
+
+	return sb.String()
+}
+
+// splitPartitionDefs splits the inner content of a PARTITION ... () clause
+// into individual partition definitions. Each element starts with "PARTITION ".
+func splitPartitionDefs(inner string) []string {
+	upper := strings.ToUpper(inner)
+	var parts []string
+	start := 0
+
+	i := 0
+	for i < len(inner) {
+		// Look for "PARTITION " keyword
+		if i+9 <= len(inner) && upper[i:i+9] == "PARTITION" {
+			// Check that it's followed by a space (not part of a longer word)
+			if i+9 < len(inner) && isSpace(rune(inner[i+9])) {
+				// Also check it's at a word boundary (preceded by whitespace or start)
+				if i == 0 || isSpace(rune(inner[i-1])) || inner[i-1] == ',' {
+					if start < i {
+						parts = append(parts, inner[start:i])
+					}
+					start = i
+					i += 9
+					continue
+				}
+			}
+		}
+		i++
+	}
+	if start < len(inner) {
+		parts = append(parts, inner[start:])
+	}
+
+	return parts
+}
+
+// isSpace checks if a rune is whitespace.
+func isSpace(r rune) bool {
+	return unicode.IsSpace(r)
+}

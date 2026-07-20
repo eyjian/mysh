@@ -3832,7 +3832,9 @@ func (m *Model) handleDesc(parts []string) {
 			m.addOutput(fmt.Sprintf("ERROR: %s", err))
 			return
 		}
-		// Highlight the CREATE TABLE statement (preserve DB formatting, don't reformat)
+		// Format the PARTITION clause for readability (MySQL returns
+		// all partition definitions on a single line)
+		createSQL = highlight.FormatCreateTableSQL(createSQL)
 		if m.deps.Highlighter != nil {
 			m.addOutput(m.deps.Highlighter.Highlight(createSQL))
 		} else {
