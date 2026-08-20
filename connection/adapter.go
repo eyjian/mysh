@@ -5,6 +5,14 @@ import (
 	"database/sql"
 )
 
+// Execer abstracts statement execution so that operations can run either on
+// the whole pool (*sql.DB) or on a single dedicated connection (*sql.Conn).
+// This matters for session-scoped statements such as MySQL's "USE db" which
+// only affect the connection they run on.
+type Execer interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
 // DBAdapter abstracts database-specific operations so that mysh can support
 // multiple database backends (MySQL, PostgreSQL, etc.).
 type DBAdapter interface {
@@ -28,8 +36,16 @@ type DBAdapter interface {
 	// the current search_path schema (typically "public").
 	CurrentSchema(db *sql.DB) (string, error)
 
-	// UseDB switches to the specified database/schema.
-	UseDB(ctx context.Context, db *sql.DB, name string) error
+	// UseDB switches to the specified database/schema on the given
+	// connection (or pool). Note: on a pool this only affects one
+	// connection; see UseDBViaDSN for pool-wide switching.
+	UseDB(ctx context.Context, db Execer, name string) error
+
+	// UseDBViaDSN reports whether the target database of UseDB can be baked
+	// into the DSN, so that switching databases pool-wide is possible by
+	// rebuilding the pool. MySQL: true ("USE db" ≡ DSN "/db").
+	// PostgreSQL: false (UseDB maps to SET search_path, a session variable).
+	UseDBViaDSN() bool
 
 	// Databases returns a list of accessible databases/schemas.
 	Databases(db *sql.DB) ([]string, error)

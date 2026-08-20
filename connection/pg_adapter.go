@@ -74,18 +74,26 @@ func (pgAdapter) QuoteIdentifier(name string) string {
 }
 
 func (pgAdapter) CurrentDB(db *sql.DB) (string, error) {
-	var name string
+	var name sql.NullString
 	err := db.QueryRow("SELECT current_database()").Scan(&name)
-	return name, err
+	if err != nil {
+		return "", err
+	}
+	return name.String, nil
 }
 
 func (pgAdapter) CurrentSchema(db *sql.DB) (string, error) {
-	var name string
+	var name sql.NullString
 	err := db.QueryRow("SELECT current_schema()").Scan(&name)
-	return name, err
+	if err != nil {
+		return "", err
+	}
+	return name.String, nil
 }
 
-func (pgAdapter) UseDB(ctx context.Context, db *sql.DB, name string) error {
+func (pgAdapter) UseDBViaDSN() bool { return false }
+
+func (pgAdapter) UseDB(ctx context.Context, db Execer, name string) error {
 	_, err := db.ExecContext(ctx, `SET search_path TO "`+strings.ReplaceAll(name, `"`, `""`)+`"`)
 	return err
 }

@@ -27,9 +27,13 @@ func (mysqlAdapter) QuoteIdentifier(name string) string {
 }
 
 func (mysqlAdapter) CurrentDB(db *sql.DB) (string, error) {
-	var name string
+	var name sql.NullString
 	err := db.QueryRow("SELECT DATABASE()").Scan(&name)
-	return name, err
+	if err != nil {
+		return "", err
+	}
+	// No database selected → empty string, not an error.
+	return name.String, nil
 }
 
 func (mysqlAdapter) CurrentSchema(db *sql.DB) (string, error) {
@@ -37,8 +41,10 @@ func (mysqlAdapter) CurrentSchema(db *sql.DB) (string, error) {
 	return mysqlAdapter{}.CurrentDB(db)
 }
 
-func (mysqlAdapter) UseDB(ctx context.Context, db *sql.DB, name string) error {
-	_, err := db.ExecContext(ctx, "USE `"+name+"`")
+func (mysqlAdapter) UseDBViaDSN() bool { return true }
+
+func (mysqlAdapter) UseDB(ctx context.Context, db Execer, name string) error {
+	_, err := db.ExecContext(ctx, "USE "+mysqlAdapter{}.QuoteIdentifier(name))
 	return err
 }
 

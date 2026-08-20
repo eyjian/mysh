@@ -2,8 +2,10 @@ package connection
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -241,17 +243,66 @@ func TestPool_CurrentDB_Error(t *testing.T) {
 	closePool(t, pool, mock)
 }
 
+func TestPool_CurrentDB_Null(t *testing.T) {
+	pool, mock := newMockPool(t)
+
+	// SELECT DATABASE() returns NULL when no database is selected; that is
+	// "no database", not an error.
+	rows := sqlmock.NewRows([]string{"DATABASE()"}).AddRow(nil)
+	mock.ExpectQuery("SELECT DATABASE").WillReturnRows(rows)
+
+	db := pool.CurrentDB()
+	if db != "" {
+		t.Errorf("CurrentDB() = %q, want empty string for NULL", db)
+	}
+	closePool(t, pool, mock)
+}
+
 // --- UseDB ---
+
+// newResetMockDB creates a sqlmock DB (with ping expected) that a Pool can
+// be reset onto.
+func newResetMockDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	mock.ExpectPing()
+	return db
+}
 
 func TestPool_UseDB(t *testing.T) {
 	pool, mock := newMockPool(t)
 
+	// Validation on a dedicated connection...
 	mock.ExpectExec("USE `mydb`").WillReturnResult(sqlmock.NewResult(0, 0))
+	// ...then the pool is rebuilt with the new database in the DSN.
+	newDB := newResetMockDB(t)
+	pool.openDB = func(driverName, dsn string) (*sql.DB, error) {
+		if driverName != "mysql" {
+			t.Errorf("openDB driver = %q, want %q", driverName, "mysql")
+		}
+		if !strings.Contains(dsn, "/mydb") {
+			t.Errorf("openDB dsn = %q, want it to contain /mydb", dsn)
+		}
+		return newDB, nil
+	}
+	mock.ExpectClose() // old pool closed after the new one is verified
 
 	if err := pool.UseDB(context.Background(), "mydb"); err != nil {
 		t.Errorf("UseDB() error = %v", err)
 	}
-	closePool(t, pool, mock)
+	if pool.cfg.Database != "mydb" {
+		t.Errorf("cfg.Database = %q, want %q", pool.cfg.Database, "mydb")
+	}
+	if pool.DB() != newDB {
+		t.Error("pool should be backed by the new DB after UseDB")
+	}
+	newDB.Close()
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
 }
 
 func TestPool_UseDB_Error(t *testing.T) {
@@ -262,7 +313,44 @@ func TestPool_UseDB_Error(t *testing.T) {
 	if err := pool.UseDB(context.Background(), "baddb"); err == nil {
 		t.Error("UseDB() should return error for unknown database")
 	}
+	if pool.cfg.Database != "testdb" {
+		t.Errorf("cfg.Database should be unchanged, got %q", pool.cfg.Database)
+	}
 	closePool(t, pool, mock)
+}
+
+func TestPool_UseDB_EmptyName(t *testing.T) {
+	pool, mock := newMockPool(t)
+	if err := pool.UseDB(context.Background(), ""); err == nil {
+		t.Error("UseDB() with empty name should return error")
+	}
+	closePool(t, pool, mock)
+}
+
+func TestPool_UseDB_PostgresLegacy(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.ConnectionConfig{Driver: "postgres", Host: "localhost", Port: 5432, User: "postgres", Database: "testdb"}
+	pool := NewWithDB(db, cfg)
+
+	// PostgreSQL keeps per-connection semantics (SET search_path); no rebuild.
+	mock.ExpectExec("SET search_path TO").WillReturnResult(sqlmock.NewResult(0, 0))
+	if err := pool.UseDB(context.Background(), "public"); err != nil {
+		t.Errorf("UseDB() error = %v", err)
+	}
+	if pool.DB() != db {
+		t.Error("pool DB should be unchanged for postgres")
+	}
+	if pool.cfg.Database != "testdb" {
+		t.Errorf("cfg.Database should be unchanged, got %q", pool.cfg.Database)
+	}
+	mock.ExpectClose()
+	pool.Close()
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
 }
 
 // --- DB ---

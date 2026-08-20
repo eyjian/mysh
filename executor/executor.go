@@ -100,6 +100,12 @@ func (e *Executor) Execute(ctx context.Context, query string) (*QueryResult, err
 		return e.rollbackTransaction(ctx)
 	}
 
+	// Intercept "USE <db>" so the switch applies to the whole connection
+	// pool, not just the single connection that happens to execute it.
+	if dbName, ok := parseUseStatement(query); ok {
+		return e.switchDatabase(ctx, dbName)
+	}
+
 	result, err := e.executeOnce(ctx, query)
 	if err == nil || !connection.IsConnectionError(err) {
 		if err == nil && e.slowThreshold > 0 && result.Duration > e.slowThreshold {
@@ -447,6 +453,93 @@ func (e *Executor) releaseTxConn() {
 func (e *Executor) isBeginStatement(upper string) bool {
 	return upper == "BEGIN" || upper == "START TRANSACTION" ||
 		strings.HasPrefix(upper, "START TRANSACTION ")
+}
+
+// switchDatabase switches the current database pool-wide.
+// It is used for SQL "USE <db>" statements, which must not be executed on a
+// single pooled connection: the resulting database selection would be visible
+// only to that connection, leaving the rest of the pool on the old (or no)
+// database.
+func (e *Executor) switchDatabase(ctx context.Context, dbName string) (*QueryResult, error) {
+	start := time.Now()
+
+	if e.inTransaction {
+		return nil, fmt.Errorf("cannot switch database inside a transaction; COMMIT or ROLLBACK first")
+	}
+	if e.pool == nil {
+		return nil, fmt.Errorf("no connection available")
+	}
+	if err := e.pool.UseDB(ctx, dbName); err != nil {
+		return nil, err
+	}
+	if e.meta != nil {
+		e.meta.MarkDirty()
+	}
+
+	return &QueryResult{
+		Duration: time.Since(start),
+		IsQuery:  false,
+		Warning:  "Database changed to " + dbName,
+	}, nil
+}
+
+// parseUseStatement reports whether query is a "USE <db>" statement and
+// returns the target database name, with identifier quotes removed.
+func parseUseStatement(query string) (string, bool) {
+	s := stripComments(strings.TrimSpace(query))
+	s = strings.TrimSuffix(s, ";")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+
+	head := s
+	rest := ""
+	if i := strings.IndexAny(s, " \t\r\n"); i >= 0 {
+		head, rest = s[:i], strings.TrimSpace(s[i+1:])
+	}
+	if !strings.EqualFold(head, "USE") || rest == "" {
+		return "", false
+	}
+
+	// Quoted identifier: take the quoted token (`` `db` ``, `"db"`, `'db'`).
+	if c := rest[0]; c == '`' || c == '"' || c == '\'' {
+		return unquoteIdentifier(rest, c)
+	}
+
+	// Bare identifier: take the first token (ignore trailing comments etc.).
+	if i := strings.IndexAny(rest, " \t\r\n"); i >= 0 {
+		rest = rest[:i]
+	}
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
+// unquoteIdentifier strips the surrounding quote character qc from s and
+// unescapes doubled quotes (e.g. ``a``b`` → `a`b`).
+func unquoteIdentifier(s string, qc byte) (string, bool) {
+	if len(s) < 2 || s[0] != qc {
+		return "", false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] != qc {
+			continue
+		}
+		// Doubled quote = escaped literal quote.
+		if i+1 < len(s) && s[i+1] == qc {
+			i++
+			continue
+		}
+		// Closing quote. Anything significant after it is unexpected.
+		if strings.TrimSpace(s[i+1:]) != "" {
+			return "", false
+		}
+		inner := strings.ReplaceAll(s[1:i], string(qc)+string(qc), string(qc))
+		return inner, true
+	}
+	return "", false // unterminated quote
 }
 
 // isCommitStatement checks if the SQL commits a transaction.

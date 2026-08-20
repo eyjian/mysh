@@ -21,6 +21,10 @@ type Pool struct {
 	closed       bool
 	connTimeout  time.Duration // per-query connection timeout (default 30s)
 	lastActivity time.Time     // last successful query timestamp
+
+	// openDB opens the underlying *sql.DB for (re)connection. Overridable
+	// in tests; nil means sql.Open.
+	openDB func(driverName, dsn string) (*sql.DB, error)
 }
 
 // New creates a new connection pool and verifies connectivity.
@@ -249,21 +253,62 @@ func (p *Pool) DriverName() string {
 }
 
 // UseDB switches the current database.
+//
+// "USE db" is per-connection session state, but this pool may hold several
+// server connections (and opens new ones lazily). Executing "USE db" via
+// pool.Exec would only affect one connection, leaving the others (and every
+// future connection) on the old database — the classic "No database selected"
+// trap. Instead:
+//
+//   - DSN-based drivers (MySQL): verify the target on one dedicated
+//     connection, then rebuild the pool with the new database baked into
+//     the DSN so every connection starts on it.
+//   - Session-based drivers (PostgreSQL, where UseDB is SET search_path):
+//     keep the per-connection behavior.
 func (p *Pool) UseDB(ctx context.Context, dbName string) error {
-	return p.adapter.UseDB(ctx, p.db, dbName)
+	if dbName == "" {
+		return fmt.Errorf("database name is empty")
+	}
+	if p.closed || p.db == nil {
+		return fmt.Errorf("connection is closed")
+	}
+
+	if !p.adapter.UseDBViaDSN() {
+		// Per-connection semantics only (e.g. SET search_path).
+		return p.adapter.UseDB(ctx, p.db, dbName)
+	}
+
+	// Validate on a dedicated connection first, so a bad name or missing
+	// privilege leaves the current pool untouched.
+	conn, err := p.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	if err := p.adapter.UseDB(ctx, conn, dbName); err != nil {
+		conn.Close()
+		return err
+	}
+	conn.Close()
+
+	// Rebuild the pool so all connections (current and future) start on dbName.
+	newCfg := *p.cfg
+	newCfg.Database = dbName
+	return p.Reset(&newCfg)
 }
 
 // Reset re-establishes the connection with a new config.
+// The old pool is only closed after the new one is verified, so a failed
+// reset does not leave the pool unusable.
 func (p *Pool) Reset(cfg *config.ConnectionConfig) error {
-	if p.db != nil {
-		p.db.Close()
-	}
-
 	p.cfg = cfg
 	p.closed = false
 	p.adapter = NewAdapter(cfg.Driver)
 
-	db, err := sql.Open(p.adapter.DriverName(), p.adapter.DSN(
+	open := p.openDB
+	if open == nil {
+		open = sql.Open
+	}
+	db, err := open(p.adapter.DriverName(), p.adapter.DSN(
 		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database, cfg.Charset, cfg.SSLMode))
 	if err != nil {
 		return fmt.Errorf("failed to reset connection: %w", err)
@@ -282,6 +327,10 @@ func (p *Pool) Reset(cfg *config.ConnectionConfig) error {
 		return fmt.Errorf("failed to ping after reset: %w", err)
 	}
 
+	// Swap: only tear down the old pool once the new one is live.
+	if p.db != nil {
+		p.db.Close()
+	}
 	p.db = db
 	p.lastActivity = time.Now()
 	return nil

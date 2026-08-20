@@ -194,6 +194,60 @@ func TestNullString(t *testing.T) {
 	}
 }
 
+// ---- USE statement parsing tests ----
+
+func TestParseUseStatement(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{"use mydb", "mydb", true},
+		{"USE mydb", "mydb", true},
+		{"UsE mydb;", "mydb", true},
+		{"  use   mydb  ;  ", "mydb", true},
+		{"use `my db`", "my db", true},
+		{"use `my``db`", "my`db", true},
+		{`use "mydb"`, "mydb", true},
+		{"use 'mydb'", "mydb", true},
+		{"use mydb -- trailing comment", "mydb", true},
+		{"-- leading comment\nuse mydb", "mydb", true},
+		{"/* block */ use mydb", "mydb", true},
+		{"use", "", false},                  // no target
+		{"use ;", "", false},                // no target
+		{"USE `unterminated", "", false},    // unterminated quote
+		{"USE `db` extra", "", false},       // junk after quoted identifier
+		{"SELECT DATABASE()", "", false},    // not a USE statement
+		{"INSERT INTO t VALUES ('use x')", "", false},
+		{"", "", false},
+		{"   ", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := parseUseStatement(tt.input)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("parseUseStatement(%q) = (%q, %v), want (%q, %v)",
+				tt.input, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestExecute_UseWithoutPool(t *testing.T) {
+	e := New(nil, nil)
+	_, err := e.Execute(context.Background(), "use mydb")
+	if err == nil {
+		t.Error("Execute(use ...) without pool should return error")
+	}
+}
+
+func TestExecute_UseInsideTransactionDenied(t *testing.T) {
+	e := New(nil, nil)
+	e.inTransaction = true
+	_, err := e.Execute(context.Background(), "use mydb")
+	if err == nil {
+		t.Error("Execute(use ...) inside a transaction should return error")
+	}
+}
+
 // ---- QueryResult struct test ----
 
 func TestQueryResult_Fields(t *testing.T) {

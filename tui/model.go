@@ -995,6 +995,16 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.execSourceFile(filePath)
 	}
 
+	// Handle "use <db>" (MySQL-style client command; no semicolon required).
+	// The mysql CLI executes USE immediately without a trailing semicolon;
+	// without this, a bare "use db" sits in the multiline buffer and never
+	// runs, leaving the session on the old (or no) database. Executor.Execute
+	// routes it to a pool-wide database switch.
+	if len(m.multilineParts) == 0 && (lowerCmd == "use" || strings.HasPrefix(lowerCmd, "use ")) {
+		m.ed.Clear()
+		return m.executeInput(cmd, output.FormatTable)
+	}
+
 	// Check for format suffixes: \G (vertical), \j (json), \m (markdown)
 	trimmed, formatOverride := parseFormatSuffix(trimmed)
 
@@ -1071,6 +1081,10 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 	case "\\use":
 		if len(parts) < 2 {
 			m.addOutput("Usage: \\use <database>")
+		} else if m.deps.Executor != nil && m.deps.Executor.InTransaction() {
+			// Switching databases rebuilds the connection pool, which would
+			// break the dedicated transaction connection.
+			m.addOutput("ERROR: cannot switch database inside a transaction; COMMIT or ROLLBACK first")
 		} else {
 			dbName := parts[1]
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1078,8 +1092,10 @@ func (m Model) handleBackslashCommand(cmd string) (tea.Model, tea.Cmd) {
 			if err := m.deps.Pool.UseDB(ctx, dbName); err != nil {
 				m.addOutput(fmt.Sprintf("ERROR: %s", err))
 			} else {
-				m.deps.Meta.MarkDirty()
-				m.deps.Meta.Refresh()
+				if m.deps.Meta != nil {
+					m.deps.Meta.MarkDirty()
+					go m.deps.Meta.Refresh()
+				}
 				m.addOutput(fmt.Sprintf("Database changed to %s", dbName))
 			}
 		}
@@ -1695,7 +1711,10 @@ func (m Model) executeInput(input string, formatOverride output.Format) (tea.Mod
 	if !m.autoCommit && m.deps.Executor != nil && !m.deps.Executor.InTransaction() {
 		upper := strings.ToUpper(strings.TrimSpace(input))
 		upper = strings.TrimSuffix(upper, ";")
-		if !m.isTransactionControl(upper) {
+		// USE switches databases pool-wide and is rejected inside a
+		// transaction — don't auto-BEGIN around it.
+		isUse := upper == "USE" || strings.HasPrefix(upper, "USE ")
+		if !m.isTransactionControl(upper) && !isUse {
 			if _, err := m.deps.Executor.Execute(context.Background(), "BEGIN"); err != nil {
 				m.addOutput(fmt.Sprintf("ERROR: %s", err))
 				m.ed.Clear()

@@ -302,6 +302,52 @@ func TestBackslashCommand_UseNoArg(t *testing.T) {
 	}
 }
 
+func TestUseStatement_NoSemicolon_ExecutesImmediately(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("use testdb")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.multiline {
+		t.Error("use <db> without semicolon should execute immediately, not enter multiline mode")
+	}
+	if len(updated.multilineParts) != 0 {
+		t.Errorf("multilineParts = %v, want empty", updated.multilineParts)
+	}
+}
+
+func TestUseStatement_Uppercase_NoSemicolon(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("USE testdb")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.multiline {
+		t.Error("USE <db> without semicolon should execute immediately")
+	}
+}
+
+func TestUseStatement_WithSemicolon_Executes(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("use testdb;")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if updated.multiline {
+		t.Error("use <db>; should execute immediately")
+	}
+}
+
+func TestPlainSelect_NoSemicolon_StillMultiline(t *testing.T) {
+	m := newTestModel()
+	m.ed.Insert("select 1")
+	model, _ := m.handleEnter()
+	updated := model.(Model)
+	if !updated.multiline {
+		t.Error("plain SQL without semicolon should still enter multiline mode")
+	}
+	if len(updated.multilineParts) != 1 {
+		t.Errorf("multilineParts len = %d, want 1", len(updated.multilineParts))
+	}
+}
+
 func TestBackslashCommand_ConnectNoArg(t *testing.T) {
 	m := newTestModel()
 	m.ed.Insert("\\connect")
